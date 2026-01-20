@@ -1,147 +1,53 @@
 import streamlit as st
-import pandas as pd
 import requests
-import urllib3
 
-# SSL 경고 무시
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+st.set_page_config(page_title="API 키 정밀 진단")
+st.title("🔑 API 키 정밀 테스트 (환경공단)")
 
-# ---------------------------------------------------------
-# 1. 설정
-# ---------------------------------------------------------
-st.set_page_config(page_title="관측소 조회 (비상모드)", layout="wide")
-st.title("🛡️ 관측소 조회 (차단 방지 + 비상 목록)")
-st.caption("서버 차단 시, 내장된 주요 지점 목록을 자동으로 불러옵니다.")
+# 1. 입력하신 키
+USER_KEY = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
 
-HRFCO_KEY = "F09631CC-1CFB-4C55-8329-BE03A787011E"
-try:
-    DATA_GO_KEY = st.secrets["public_api_key"]
-except:
-    DATA_GO_KEY = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
+st.write(f"**테스트할 키:** `{USER_KEY}`")
 
-# [강력한 신분증 헤더]
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/json',
-    'Connection': 'keep-alive'
+# 2. 요청 보낼 주소 (수질 측정소 목록 조회)
+url = "http://apis.data.go.kr/1480523/WaterQualityService/getMsrstnList"
+
+# 3. 파이썬용 파라미터 (Decoding 키 그대로 사용)
+params = {
+    "serviceKey": USER_KEY,
+    "numOfRows": "1",
+    "pageNo": "1",
+    "returnType": "json"  # JSON으로 달라고 요청
 }
 
-# ---------------------------------------------------------
-# 2. [치트키] 금강 수계 주요 지점 수동 리스트
-# ---------------------------------------------------------
-def get_manual_fallback_list():
-    """
-    API가 차단당했을 때 보여줄 금강 수계 알짜배기 리스트
-    """
-    data = [
-        # --- 갑천 ---
-        {'관측소명': '대전시(갑천교)', '코드': '3009660', '주소': '대전광역시 서구 월평동'},
-        {'관측소명': '대전시(원촌교)', '코드': '3009670', '주소': '대전광역시 대덕구 대화동'},
-        {'관측소명': '대전시(인창교)', '코드': '3009640', '주소': '대전광역시 중구 산성동'},
-        
-        # --- 이원/옥천 ---
-        {'관측소명': '옥천군(이원교)', '코드': '3008680', '주소': '충청북도 옥천군 이원면'},
-        {'관측소명': '옥천군(옥천대교)', '코드': '3008655', '주소': '충청북도 옥천군 동이면'},
-        
-        # --- 4대강 보 ---
-        {'관측소명': '세종보', '코드': '3012650', '주소': '세종특별자치시 연기면'},
-        {'관측소명': '공주보', '코드': '3012640', '주소': '충청남도 공주시 우성면'},
-        {'관측소명': '백제보', '코드': '3012620', '주소': '충청남도 부여군 부여읍'},
-        
-        # --- 댐/주요 교량 ---
-        {'관측소명': '대청댐', '코드': '1003660', '주소': '대전광역시 대덕구 미호동'},
-        {'관측소명': '공주시(금강교)', '코드': '3012630', '주소': '충청남도 공주시 신관동'},
-        {'관측소명': '부여군(백제교)', '코드': '3012660', '주소': '충청남도 부여군 부여읍'},
-    ]
-    return pd.DataFrame(data)
-
-# ---------------------------------------------------------
-# 3. 수위 관측소 가져오기 (API 시도 -> 실패시 수동)
-# ---------------------------------------------------------
-def get_hrfco_stations():
-    url = f"http://api.hrfco.go.kr/{HRFCO_KEY}/waterlevel/list.json"
-    
+if st.button("서버 찔러보기 (테스트 시작)"):
     try:
-        # API 접속 시도
-        response = requests.get(url, headers=HEADERS, verify=False, timeout=5)
+        # User-Agent 헤더 추가 (봇 차단 방지)
+        headers = {'User-Agent': 'Mozilla/5.0'}
         
-        if response.status_code == 200:
-            data = response.json()
-            if 'content' in data:
-                df = pd.DataFrame(data['content'])
-                # 한글 변환
-                df = df.rename(columns={
-                    'wlobscd': '코드', 'obsnm': '관측소명', 'addr': '주소', 'agcnm': '관리기관'
-                })
-                # 필터링 없이 주요 컬럼 정리
-                cols = ['관측소명', '코드', '주소', '관리기관']
-                final_cols = [c for c in cols if c in df.columns] + [c for c in df.columns if c not in cols]
-                return df[final_cols], "API 접속 성공 (전체 목록)"
-    except:
-        pass # 에러나면 바로 밑으로 넘어감
-    
-    # [비상] API 실패 시 수동 리스트 반환
-    return get_manual_fallback_list(), "⚠️ API 차단됨 (비상용 수동 목록 표시)"
-
-# ---------------------------------------------------------
-# 4. 수질 측정소 가져오기 (환경공단)
-# ---------------------------------------------------------
-def get_nier_stations():
-    url = "http://apis.data.go.kr/1480523/WaterQualityService/getMsrstnList"
-    params = {"serviceKey": DATA_GO_KEY, "numOfRows": "3000", "pageNo": "1", "returnType": "json"}
-    
-    try:
-        response = requests.get(url, params=params, headers=HEADERS, timeout=10)
-        data = response.json()
-        if 'getMsrstnList' in data:
-            df = pd.DataFrame(data['getMsrstnList']['item'])
-            df = df.rename(columns={'ptNo': '코드', 'ptNm': '측정소명', 'addr': '주소', 'deptNm': '관리부서'})
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        
+        st.subheader("📨 서버 응답 결과")
+        st.write(f"**HTTP 상태 코드:** {response.status_code} (200이면 통신 성공)")
+        
+        # 내용물 확인
+        raw_text = response.text
+        
+        if "<SERVICE_KEY_IS_NOT_REGISTERED>" in raw_text:
+            st.error("🚨 결과: SERVICE_KEY_IS_NOT_REGISTERED")
+            st.warning("👉 원인: 키는 맞는데, 아직 서버에 등록이 안 된 상태입니다. 1시간 뒤에 다시 해보세요!")
             
-            cols = ['측정소명', '코드', '주소', '관리부서']
-            final_cols = [c for c in cols if c in df.columns]
-            return df[final_cols], "API 접속 성공"
-    except:
-        # 수질도 실패 시 주요 지점 수동 반환
-        fallback = [
-            {'측정소명': '이원', '코드': '1003A07', '주소': '충북 옥천군'},
-            {'측정소명': '갑천1', '코드': '2014A20', '주소': '대전'},
-            {'측정소명': '대청호(추소)', '코드': '1003A05', '주소': '추소리'},
-            {'측정소명': '공주보', '코드': '2015A30', '주소': '공주'},
-        ]
-        return pd.DataFrame(fallback), "⚠️ API 접속 실패 (수동 목록)"
-
-# ---------------------------------------------------------
-# 5. 메인 화면
-# ---------------------------------------------------------
-tab1, tab2 = st.tabs(["🌊 수위 관측소 (갑천/이원 등)", "🧪 수질 측정소"])
-
-with tab1:
-    if st.button("수위 관측소 조회", type="primary"):
-        with st.spinner("목록 확인 중..."):
-            df, msg = get_hrfco_stations()
+        elif "<OpenAPI_ServiceResponse>" in raw_text:
+            st.code(raw_text, language="xml")
+            st.error("🚨 결과: 인증 에러 발생 (상세 내용 위 참조)")
             
-            if "차단" in msg:
-                st.warning(f"{msg} - 서버 보안 문제로 전체 목록 대신 **주요 지점(갑천, 이원, 보)** 목록을 보여줍니다.")
-            else:
-                st.success(msg)
-                
-            st.dataframe(df, use_container_width=True, hide_index=True)
+        elif "response" in raw_text or "getMsrstnList" in raw_text:
+            st.success("✅ 성공! 키가 정상 작동 중입니다.")
+            st.json(response.json())
             
-            # 여기서 코드와 이름을 확인하세요!
-            st.markdown("""
-            ### 📌 주요 지점 코드 확인 (복사해서 쓰세요)
-            - **대전 갑천(갑천교):** `3009660`
-            - **옥천 이원(이원교):** `3008680`
-            - **공주보:** `3012640`
-            - **대청댐:** `1003660`
-            """)
-
-with tab2:
-    if st.button("수질 측정소 조회", type="secondary"):
-        with st.spinner("목록 확인 중..."):
-            df_q, msg_q = get_nier_stations()
-            if "실패" in msg_q:
-                 st.warning(msg_q)
-            else:
-                 st.success(msg_q)
-            st.dataframe(df_q, use_container_width=True, hide_index=True)
+        else:
+            st.info("❓ 알 수 없는 응답입니다. 내용을 확인하세요:")
+            st.code(raw_text)
+            
+    except Exception as e:
+        st.error(f"❌ 통신 실패: {e}")
