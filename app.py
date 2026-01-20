@@ -1,212 +1,135 @@
 import streamlit as st
 import pandas as pd
 import requests
-import matplotlib.pyplot as plt
-import seaborn as sns
-from datetime import datetime, timedelta
-import platform
+import json
 
 # ---------------------------------------------------------
-# 1. 기본 설정
+# 1. API 키 및 설정
 # ---------------------------------------------------------
-st.set_page_config(page_title="금강 수계 통합 분석", layout="wide")
+st.set_page_config(page_title="관측소 전체 리스트 조회", layout="wide")
+st.title("📋 API 제공 관측소 전체 리스트 확인")
 
-try:
-    system_name = platform.system()
-    if system_name == 'Darwin': plt.rc('font', family='AppleGothic') 
-    elif system_name == 'Windows': plt.rc('font', family='Malgun Gothic') 
-    else: plt.rc('font', family='NanumGothic')
-    plt.rc('axes', unicode_minus=False)
-except: pass
-
-# API 키
+# 한강홍수통제소 키
 HRFCO_KEY = "F09631CC-1CFB-4C55-8329-BE03A787011E"
+
+# 환경공단 키 (Secrets 또는 기존 키)
 try:
     DATA_GO_KEY = st.secrets["public_api_key"]
 except:
     DATA_GO_KEY = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
 
-# ---------------------------------------------------------
-# 2. [해결] 지점 코드 하드코딩 (목록 조회 API가 막혔을 때 대처)
-# ---------------------------------------------------------
-@st.cache_data(ttl=86400)
-def get_station_mapping():
-    """
-    한강홍수통제소(수위) 표준 코드와 환경공단(수질) 코드를 매핑합니다.
-    * 목록 API 호출 실패를 대비해, 확인된 코드를 직접 넣었습니다.
-    """
-    stations = [
-        {
-            "name": "대전 갑천 (갑천교)", 
-            "wal_code": "3009660", # 한강홍수통제소 표준코드
-            "qual_code": "2014A20" # 환경공단 (갑천1)
-        },
-        {
-            "name": "옥천 이원 (이원교)", 
-            "wal_code": "3008680", 
-            "qual_code": "1003A07" # 환경공단 (이원)
-        },
-        {
-            "name": "공주 (공주대교)", # 공주보 대신 공주대교 수위 사용
-            "wal_code": "3012630", 
-            "qual_code": "2015A30" # 공주보 수질
-        },
-        {
-            "name": "부여 (백제교)", # 백제보 근처
-            "wal_code": "3012660", 
-            "qual_code": "2015A35"
-        },
-        {
-            "name": "대청댐 (본체)",
-            "wal_code": "1003660",
-            "qual_code": "1003A05"
-        }
-    ]
-    return pd.DataFrame(stations)
+# 봇 차단 방지용 헤더 (필수!)
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+}
 
 # ---------------------------------------------------------
-# 3. 데이터 조회 (User-Agent 추가로 차단 회피)
+# 2. 한강홍수통제소 (수위) 리스트 가져오기
 # ---------------------------------------------------------
+def get_hrfco_list():
+    # 전체 목록 조회 URL
+    url = f"http://api.hrfco.go.kr/{HRFCO_KEY}/waterlevel/list.json"
+    
+    try:
+        response = requests.get(url, headers=HEADERS, verify=False, timeout=10)
+        
+        # 응답 확인
+        if response.status_code != 200:
+            return None, f"HTTP 에러: {response.status_code}"
+            
+        data = response.json()
+        if 'content' in data:
+            df = pd.DataFrame(data['content'])
+            # 보기 좋게 컬럼 정리 (관측소명, 코드, 주소)
+            if 'obsnm' in df.columns:
+                return df[['obsnm', 'wlobscd', 'addr', 'etcaddr']], "성공"
+            else:
+                return df, "성공(컬럼명 다름)"
+        else:
+            return None, "데이터 없음 (Content 필드 누락)"
+            
+    except Exception as e:
+        return None, f"통신 에러: {e}"
 
-@st.cache_data(ttl=3600)
-def get_hrfco_water_level(station_code, start_date, end_date):
-    """
-    한강홍수통제소 수위 조회
-    """
-    s_str = start_date.strftime("%Y%m%d") + "0000"
-    e_str = end_date.strftime("%Y%m%d") + "2359"
-    
-    url = f"http://api.hrfco.go.kr/{HRFCO_KEY}/waterlevel/list/1H/{station_code}/{s_str}/{e_str}.json"
-    
-    # [중요] 봇 차단 방지용 헤더
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+# ---------------------------------------------------------
+# 3. 환경공단 (수질) 리스트 가져오기
+# ---------------------------------------------------------
+def get_nier_list():
+    url = "http://apis.data.go.kr/1480523/WaterQualityService/getMsrstnList"
+    params = {
+        "serviceKey": DATA_GO_KEY,
+        "numOfRows": "2000", # 최대한 많이 가져오기
+        "pageNo": "1",
+        "returnType": "json"
     }
     
     try:
-        response = requests.get(url, headers=headers, verify=False, timeout=10)
-        data = response.json()
+        response = requests.get(url, params=params, headers=HEADERS, timeout=10)
         
-        if 'content' in data:
-            items = data['content']
-            df = pd.DataFrame(items)
-            df['datetime'] = pd.to_datetime(df['ymdhm'], format='%Y%m%d%H%M')
-            df['water_level'] = pd.to_numeric(df['wl'], errors='coerce')
-            return df[['datetime', 'water_level']].sort_values('datetime')
-        else:
-            return pd.DataFrame()
-    except Exception as e:
-        # 에러 발생 시 로그 출력 (디버깅용)
-        print(f"수위 조회 에러: {e}")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def get_quality_data(qual_code, start_date, end_date):
-    """
-    환경공단 수질 조회
-    """
-    url = "http://apis.data.go.kr/1480523/WaterQualityService/getWaterMeasuringList"
-    
-    # [중요] 봇 차단 방지용 헤더
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
-
-    qual_items = []
-    curr_date = start_date
-    
-    while curr_date <= end_date:
-        params = {
-            "serviceKey": DATA_GO_KEY,
-            "numOfRows": "100", "pageNo": "1", "returnType": "json",
-            "ptNo": qual_code,
-            "wmyr": curr_date.strftime("%Y"),
-            "wmmd": curr_date.strftime("%m%d")
-        }
+        # 텍스트로 먼저 받아서 에러인지 확인
+        raw_text = response.text.strip()
+        
+        if response.status_code != 200:
+            return None, f"HTTP 에러: {response.status_code}"
+            
         try:
-            res = requests.get(url, params=params, headers=headers, timeout=5)
-            data = res.json()
-            if 'getWaterMeasuringList' in data and 'item' in data['getWaterMeasuringList']:
-                items = data['getWaterMeasuringList']['item']
-                if isinstance(items, dict): items = [items]
-                qual_items.extend(items)
-        except: pass
-        curr_date += timedelta(days=1)
-        
-    if qual_items:
-        df = pd.DataFrame(qual_items)
-        df['hour_str'] = df['wmht'].astype(str).str.zfill(2)
-        df['date_str'] = df['wmyr'] + "-" + df['wmmd'].str[:2] + "-" + df['wmmd'].str[2:]
-        df['datetime'] = pd.to_datetime(df['date_str'] + " " + df['hour_str'] + ":00", errors='coerce')
-        
-        mapping = {'ph': 'pH', 'do': 'DO', 'toc': 'TOC', 'tn': 'TN', 'tp': 'TP'}
-        for k, v in mapping.items():
-            if k in df.columns: df[v] = pd.to_numeric(df[k], errors='coerce')
+            data = json.loads(raw_text)
+            if 'getMsrstnList' in data and 'item' in data['getMsrstnList']:
+                items = data['getMsrstnList']['item']
+                df = pd.DataFrame(items)
+                # 보기 좋게 정리 (측정소명, 코드, 주소)
+                if 'ptNm' in df.columns:
+                    return df[['ptNm', 'ptNo', 'addr']], "성공"
+                return df, "성공"
+            else:
+                return None, "JSON 구조가 예상과 다름"
+        except json.JSONDecodeError:
+            # JSON이 아니면 XML 에러 메시지일 확률 100%
+            return None, f"API 에러 메시지 수신: {raw_text[:200]}"
+            
+    except Exception as e:
+        return None, f"통신 에러: {e}"
+
+# ---------------------------------------------------------
+# 4. 화면 출력
+# ---------------------------------------------------------
+tab1, tab2 = st.tabs(["🌊 한강홍수통제소 (수위)", "🧪 환경공단 (수질)"])
+
+# --- 탭 1: 수위 관측소 ---
+with tab1:
+    if st.button("수위 관측소 전체 불러오기"):
+        with st.spinner("한강홍수통제소 서버에 접속 중..."):
+            df_wal, msg_wal = get_hrfco_list()
+            
+            if df_wal is not None:
+                st.success(f"✅ 총 {len(df_wal)}개의 수위 관측소를 가져왔습니다.")
+                st.dataframe(df_wal, use_container_width=True)
                 
-        return df.dropna(subset=['datetime']).sort_values('datetime')
-    else:
-        return pd.DataFrame()
+                # 검색 기능
+                search = st.text_input("수위 관측소 검색 (예: 갑천, 이원, 공주)", key="search_wal")
+                if search:
+                    res = df_wal[df_wal['obsnm'].str.contains(search) | df_wal['addr'].str.contains(search, na=False)]
+                    st.write(f"🔍 검색 결과 ({len(res)}건)")
+                    st.dataframe(res)
+            else:
+                st.error(f"❌ 목록 조회 실패: {msg_wal}")
 
-# ---------------------------------------------------------
-# 4. 메인 UI
-# ---------------------------------------------------------
-st.title("🌊 금강 수계 통합 분석 대시보드")
-st.caption("한강홍수통제소(수위) + 환경공단(수질)")
-
-with st.sidebar:
-    st.header("1️⃣ 지점 선택")
-    
-    station_df = get_station_mapping()
-    selected_name = st.selectbox("분석 지점", station_df['name'])
-    
-    row = station_df[station_df['name'] == selected_name].iloc[0]
-    sel_wal_code = row['wal_code']
-    sel_qual_code = row['qual_code']
-    
-    st.success(f"선택됨: {selected_name}")
-    st.divider()
-    
-    target_q = st.selectbox("수질 항목", ["TOC", "TP", "TN", "DO", "pH"])
-    start_date = st.date_input("시작", datetime.now() - timedelta(days=3))
-    end_date = st.date_input("종료", datetime.now())
-
-if st.button("분석 시작", type="primary"):
-    with st.spinner(f"'{selected_name}' 데이터 조회 중..."):
-        df_wal = get_hrfco_water_level(sel_wal_code, start_date, end_date)
-        df_qual = get_quality_data(sel_qual_code, start_date, end_date)
-        
-        # 데이터 유무 체크
-        if df_wal.empty and df_qual.empty:
-            st.error("수위와 수질 데이터 모두 조회되지 않았습니다. (통신 상태 확인 필요)")
-        elif df_wal.empty:
-            st.warning("⚠️ 수위 데이터를 가져오지 못했습니다.")
-            if not df_qual.empty: st.dataframe(df_qual)
-        elif df_qual.empty:
-            st.warning("⚠️ 수질 데이터를 가져오지 못했습니다.")
-            st.line_chart(df_wal, x='datetime', y='water_level')
-        else:
-            # 둘 다 있을 때 병합
-            df_merged = pd.merge_asof(
-                df_wal, df_qual, on='datetime', direction='nearest', tolerance=pd.Timedelta('1H')
-            )
+# --- 탭 2: 수질 측정소 ---
+with tab2:
+    if st.button("수질 측정소 전체 불러오기"):
+        with st.spinner("환경공단 서버에 접속 중..."):
+            df_qual, msg_qual = get_nier_list()
             
-            st.success(f"데이터 병합 완료! ({len(df_merged)}건)")
-            
-            # 그래프
-            fig, ax1 = plt.subplots(figsize=(12, 6))
-            sns.lineplot(data=df_merged, x='datetime', y='water_level', ax=ax1, color='#007acc', label='수위(m)')
-            ax1.set_ylabel('수위 (m)', color='#007acc')
-            ax1.grid(True, alpha=0.3)
-            
-            ax2 = ax1.twinx()
-            sns.lineplot(data=df_merged, x='datetime', y=target_q, ax=ax2, color='#ff7f0e', label=target_q, marker='o')
-            ax2.set_ylabel(target_q, color='#ff7f0e')
-            
-            lines1, labels1 = ax1.get_legend_handles_labels()
-            lines2, labels2 = ax2.get_legend_handles_labels()
-            ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-            
-            st.pyplot(fig)
-            
-            with st.expander("데이터 상세 보기"):
-                st.dataframe(df_merged)
+            if df_qual is not None:
+                st.success(f"✅ 총 {len(df_qual)}개의 수질 측정소를 가져왔습니다.")
+                st.dataframe(df_qual, use_container_width=True)
+                
+                # 검색 기능
+                search_q = st.text_input("수질 측정소 검색 (예: 대청, 이원)", key="search_qual")
+                if search_q:
+                    res_q = df_qual[df_qual['ptNm'].str.contains(search_q) | df_qual['addr'].str.contains(search_q, na=False)]
+                    st.write(f"🔍 검색 결과 ({len(res_q)}건)")
+                    st.dataframe(res_q)
+            else:
+                st.error(f"❌ 목록 조회 실패: {msg_qual}")
+                st.info("💡 팁: 'API 에러 메시지'가 뜨면, 공공데이터포털에서 '국립환경과학원 수질자동측정망' 활용 신청이 완료되었는지 확인해야 합니다.")
