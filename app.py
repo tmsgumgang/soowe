@@ -3,124 +3,82 @@ import pandas as pd
 import requests
 import urllib.parse
 import time
-
-# SSL 경고 무시
 import urllib3
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-st.set_page_config(page_title="수질 실시간 조회", layout="wide")
-st.title("🧪 수질자동측정망 실시간 데이터 조회")
-st.caption("사용자가 확인한 'getRealTimeWaterQualityList' 주소로 데이터를 호출합니다.")
+st.set_page_config(page_title="에러 정밀 분석", layout="wide")
+st.title("🩺 API 에러 정밀 해독기")
+st.caption("서버가 보낸 'XML 에러 메시지'를 뜯어보고, 진짜 코드를 찾습니다.")
 
-# ---------------------------------------------------------
-# [설정] 사용자 정보 입력
-# ---------------------------------------------------------
+# 사용자 정보
 USER_KEY = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
 ENCODED_KEY = urllib.parse.quote(USER_KEY)
-
-# 사용자 확인 정보: https + getRealTimeWaterQualityList
 BASE_URL = "https://apis.data.go.kr/1480523/WaterQualityService/getRealTimeWaterQualityList"
 
 # ---------------------------------------------------------
-# [핵심] 주요 지점 코드 매핑 (WAMIS 코드 기준)
+# 테스트할 코드들 (WAMIS 코드 vs 공공데이터 S코드)
 # ---------------------------------------------------------
-# 수질자동측정망은 WAMIS 코드(7자리)를 공유할 확률이 매우 높습니다.
-TARGET_STATIONS = [
-    {"name": "용담호", "code": "2003660"}, # 용담댐
-    {"name": "대청호", "code": "3008660"}, # 대청댐
-    {"name": "이원",   "code": "3008680"},
-    {"name": "갑천",   "code": "3009660"},
-    {"name": "공주",   "code": "3012640"},
-    {"name": "부여",   "code": "3012660"},
+TEST_TARGETS = [
+    # 1. 사용자님이 원하시는 WAMIS 코드 (용담호)
+    {"type": "WAMIS코드", "code": "2003660", "name": "용담호(WAMIS)"},
+    # 2. 공공데이터포털 전용 코드 (금강 S코드 추정)
+    {"type": "S코드", "code": "S03001", "name": "S코드 테스트1"},
+    {"type": "S코드", "code": "S03002", "name": "S코드 테스트2"},
 ]
 
-# ---------------------------------------------------------
-# 데이터 호출 함수
-# ---------------------------------------------------------
-def fetch_realtime_data(station_name, station_code):
-    # 파라미터 조립
-    # ptNo: 측정소코드 (여기선 WAMIS 코드를 시도)
-    # numOfRows: 1 (최신값)
+def analyze_response(station_code):
+    # ptNo로 시도 (표준)
     params = f"?serviceKey={ENCODED_KEY}&numOfRows=1&pageNo=1&returnType=json&ptNo={station_code}"
     full_url = BASE_URL + params
     
     try:
-        # HTTPS 접속, 타임아웃 10초
-        r = requests.get(full_url, verify=False, timeout=10)
+        r = requests.get(full_url, verify=False, timeout=5)
         
-        if r.status_code == 200:
-            try:
-                data = r.json()
-                # 데이터 구조 파싱
-                if 'getRealTimeWaterQualityList' in data and 'item' in data['getRealTimeWaterQualityList']:
-                    items = data['getRealTimeWaterQualityList']['item']
-                    if items:
-                        return items[0] if isinstance(items, list) else items, "성공"
-                return None, "데이터 없음(정상응답)"
-            except:
-                return None, "JSON 파싱 실패(XML 응답)"
-        elif r.status_code == 404:
-            return None, "404(주소 오류)"
-        elif r.status_code == 500:
-            return None, "500(서버 오류)"
-        else:
-            return None, f"HTTP {r.status_code}"
+        # 1. 상태코드 확인
+        if r.status_code != 200:
+            return f"HTTP 에러: {r.status_code}", False
+
+        # 2. 내용 확인 (JSON vs XML)
+        try:
+            data = r.json()
+            # 정상 JSON임
+            if 'getRealTimeWaterQualityList' in data:
+                return data, True
+            else:
+                return f"JSON은 왔으나 데이터 없음: {str(data)[:100]}", False
+        except:
+            # 3. JSON 파싱 실패 -> XML 에러 메시지 반환
+            return f"XML 응답 (에러내용): {r.text}", False
             
     except Exception as e:
-        return None, f"통신 에러: {e}"
+        return f"통신 에러: {e}", False
 
 # ---------------------------------------------------------
-# 메인 UI
+# 메인 실행
 # ---------------------------------------------------------
-if st.button("🚀 용담호~부여 데이터 가져오기", type="primary"):
+st.info("👇 아래 버튼을 누르면 서버가 보낸 '진짜 메시지'를 확인합니다.")
+
+if st.button("🚀 정밀 진단 시작", type="primary"):
     
-    results = []
-    bar = st.progress(0)
-    
-    st.write(f"📡 접속 주소: `{BASE_URL}` (HTTPS)")
-    
-    for i, station in enumerate(TARGET_STATIONS):
-        time.sleep(0.2) # 서버 부하 방지
+    for item in TEST_TARGETS:
+        st.divider()
+        st.subheader(f"🧪 테스트: {item['name']} ({item['code']})")
         
-        data, msg = fetch_realtime_data(station['name'], station['code'])
+        result, is_success = analyze_response(item['code'])
         
-        if data:
-            # 항목 매핑 (API 응답 필드명에 따라 유연하게)
-            res = {
-                "지점명": station['name'],
-                "코드": station['code'],
-                "시간": data.get('ymdhm') or data.get('mesureDt') or data.get('dt'),
-                "pH": data.get('ph') or data.get('item_ph'),
-                "DO": data.get('do') or data.get('item_do'),
-                "TOC": data.get('toc') or data.get('item_toc'),
-                "탁도": data.get('tur') or data.get('item_tur'),
-                "전기전도도": data.get('ec') or data.get('item_ec'),
-                "수온": data.get('wtem') or data.get('item_temp'),
-                "상태": "✅ 수신"
-            }
-            results.append(res)
+        if is_success:
+            st.success("✅ **성공! 데이터가 들어왔습니다.**")
+            st.json(result) # 성공한 데이터 보여줌
         else:
-            # 실패 시 로그
-            results.append({
-                "지점명": station['name'],
-                "코드": station['code'],
-                "시간": "-",
-                "pH": "-",
-                "상태": f"❌ {msg}"
-            })
+            st.error("❌ **실패 (원인 분석)**")
+            # 에러 메시지를 눈에 띄게 보여줌
+            st.code(result, language='xml')
             
-        bar.progress((i+1)/len(TARGET_STATIONS))
-        
-    # 결과 표 출력
-    st.divider()
-    st.subheader("📊 조회 결과")
-    df = pd.DataFrame(results)
-    st.dataframe(df, use_container_width=True)
-    
-    # 팁 제공
-    if any(df['상태'].str.contains("404")):
-        st.error("여전히 404라면, 'ptNo' 파라미터 이름이 다를 수 있습니다. (예: siteId)")
-    elif any(df['상태'].str.contains("데이터 없음")):
-        st.warning("정상 응답이지만 데이터가 비어있다면, 코드가 틀렸을 수 있습니다. (S코드를 써야 할 수도 있음)")
-    else:
-        st.success("🎉 성공입니다! 이 데이터로 그래프를 그리면 됩니다.")
+            # 에러 내용 해석
+            if "SERVICE_KEY_IS_NOT_REGISTERED" in str(result):
+                st.warning("👉 진단: 키 등록이 안 됨 (승인은 났지만 서버 반영 지연 중)")
+            elif "NODATA_ERROR" in str(result):
+                st.warning("👉 진단: 코드가 틀림 (이 코드는 데이터가 없음)")
+            elif "INVALID_REQUEST_PARAMETER" in str(result):
+                st.warning("👉 진단: 파라미터 이름 틀림 (ptNo 대신 다른 걸 써야 할 수도?)")
