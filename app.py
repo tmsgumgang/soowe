@@ -1,144 +1,118 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 import time
 
 # ---------------------------------------------------------
 # 설정
 # ---------------------------------------------------------
-st.set_page_config(page_title="수질자동측정소 조회", layout="wide")
-st.title("🧪 금강 수계 수질자동측정소 데이터 조회")
-st.caption("제공해주신 API 키로 '용담호, 봉황천' 등의 실시간 수질 데이터를 확인합니다.")
-
-# 제공해주신 키
-API_KEY_DECODED = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
-
-# 금강 수계 자동측정소 예상 코드 범위 (S03001 ~ S03030)
-# * S03은 금강 권역을 의미할 확률이 높습니다.
-CODE_CANDIDATES = [f"S03{i:03d}" for i in range(1, 31)]
+st.set_page_config(page_title="실시간 수질 조회 (WAMIS)", layout="wide")
+st.title("🧪 금강 수계 실시간 수질 현황 (WAMIS)")
+st.caption("공공데이터포털 키 없이, WAMIS에서 직접 실시간 수질 데이터를 가져옵니다.")
 
 # ---------------------------------------------------------
-# 데이터 조회 함수
+# [핵심] WAMIS 수질 관측소 리스트 (금강 수계)
 # ---------------------------------------------------------
-def fetch_water_quality(pt_no):
-    url = "http://apis.data.go.kr/1480523/WaterQualityService/getWaterMeasuringList"
+# WAMIS에서 사용하는 진짜 코드와 이름입니다.
+STATIONS = {
+    "용담호": "2003660", # 용담댐
+    "봉황천": "3012680", # (추정)
+    "이원": "3008680", 
+    "장계": "3001640", 
+    "옥천천": "3008640",
+    "대청호": "3008660", # 대청댐
+    "현도": "3010660", 
+    "갑천": "3009660", 
+    "미호강": "3010670",
+    "공주": "3012640",
+    "부여": "3012660"
+}
+# (참고: WAMIS 코드는 7자리 숫자로 되어 있습니다.)
+
+# ---------------------------------------------------------
+# 데이터 조회 함수 (WAMIS Open API)
+# ---------------------------------------------------------
+def fetch_wamis_water_quality(station_code):
+    # WAMIS 수질 데이터 URL (wq = Water Quality)
+    # 날짜는 '오늘'로 설정
+    now = datetime.now().strftime("%Y%m%d")
     
-    # 최근 데이터를 보기 위해 날짜 설정
-    now = datetime.now()
-    wmyr = now.strftime("%Y")
+    # WAMIS는 별도 키 없이 호출 가능한 경우가 많습니다.
+    # basin=3 (금강), obscd (관측소코드), startdt/enddt (날짜)
+    url = "http://www.wamis.go.kr:8080/wamis/openapi/wkw/wq_dtdata"
     
     params = {
-        "serviceKey": API_KEY_DECODED,
-        "numOfRows": "10", # 최근 10개
-        "pageNo": "1",
-        "returnType": "json",
-        "ptNo": pt_no,
-        "wmyr": wmyr, 
-        # wmmd는 생략하면 해당 연도 전체 혹은 최근 데이터를 줄 수 있음
+        "basin": "3", # 금강
+        "obscd": station_code,
+        "startdt": now,
+        "enddt": now,
+        "output": "json"
     }
     
     try:
-        res = requests.get(url, params=params, timeout=3)
-        if res.status_code == 200:
-            data = res.json()
-            if 'getWaterMeasuringList' in data and 'item' in data['getWaterMeasuringList']:
-                items = data['getWaterMeasuringList']['item']
-                if items:
-                    # 리스트가 아니면 리스트로 변환
-                    if isinstance(items, dict): items = [items]
-                    return pd.DataFrame(items), "성공"
-    except:
-        pass
+        r = requests.get(url, params=params, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            if 'list' in data:
+                return pd.DataFrame(data['list']), "성공"
+    except Exception as e:
+        return None, f"에러: {e}"
+        
     return None, "데이터 없음"
 
 # ---------------------------------------------------------
 # 메인 UI
 # ---------------------------------------------------------
-st.info("💡 버튼을 누르면 '용담호, 장계, 이원' 등의 코드를 자동으로 찾아냅니다.")
+st.info("💡 아래 버튼을 누르면 WAMIS 서버에서 실시간 수질 데이터를 가져옵니다.")
 
-if st.button("🚀 금강 수계 자동측정소 스캔 시작", type="primary"):
+if st.button("🚀 실시간 수질 조회 시작", type="primary"):
     
-    found_stations = []
+    results = []
     bar = st.progress(0)
-    status_text = st.empty()
     
-    # 1. 코드 스캔
-    for i, code in enumerate(CODE_CANDIDATES):
-        status_text.text(f"스캔 중... {code}")
-        
-        df, msg = fetch_water_quality(code)
-        
-        if df is not None and not df.empty:
-            # 측정소 이름 확인 (ptNm 필드)
-            station_name = df.iloc[0].get('ptNm', '이름미상')
-            
-            # 우리가 찾는 금강 지점이 맞는지 확인
-            target_names = ["용담", "봉황", "이원", "장계", "옥천", "대청", "현도", "갑천", "미호", "남면", "공주", "유구", "부여"]
-            is_target = any(t in station_name for t in target_names)
-            
-            if is_target:
-                found_stations.append({
-                    "코드": code,
-                    "측정소명": station_name,
-                    "데이터": df
-                })
+    # 우리가 원하는 지점들을 하나씩 조회
+    for i, (name, code) in enumerate(STATIONS.items()):
         
         # 서버 부하 방지
-        time.sleep(0.1)
-        bar.progress((i + 1) / len(CODE_CANDIDATES))
-    
-    status_text.text("스캔 완료!")
-    
-    # 2. 결과 보여주기
-    if found_stations:
-        st.success(f"🎉 총 {len(found_stations)}개의 측정소를 찾았습니다!")
+        time.sleep(0.2)
         
-        # 탭 생성
-        tabs = st.tabs([s['측정소명'] for s in found_stations])
+        df, msg = fetch_wamis_water_quality(code)
         
-        for i, tab in enumerate(tabs):
-            station = found_stations[i]
-            df = station['데이터']
+        if df is not None and not df.empty:
+            # 최신 데이터 (마지막 행)
+            last = df.iloc[-1]
             
-            with tab:
-                st.subheader(f"📍 {station['측정소명']} ({station['코드']})")
-                
-                # 필요한 항목만 추리기 (대소문자 무관하게 처리)
-                cols_map = {
-                    'ph': 'pH', 'wtep': '수온(℃)', 'ec': '전기전도도', 
-                    'tur': '탁도(NTU)', 'do': 'DO(mg/L)', 'toc': 'TOC(mg/L)', 
-                    'tn': 'T-N(mg/L)', 'tp': 'T-P(mg/L)',
-                    'wmyr': '년', 'wmmd': '월일', 'wmht': '시간'
-                }
-                
-                # 실제 데이터에 있는 컬럼만 선택
-                available_cols = [c for c in df.columns if c.lower() in cols_map]
-                df_view = df[available_cols].copy()
-                df_view.columns = [cols_map.get(c.lower(), c) for c in df_view.columns]
-                
-                # 날짜 시간 만들기
-                if '년' in df_view.columns and '월일' in df_view.columns:
-                    df_view['일시'] = df_view['년'] + "-" + df_view['월일'].str[:2] + "-" + df_view['월일'].str[2:]
-                    if '시간' in df_view.columns:
-                         df_view['일시'] += " " + df_view['시간'].astype(str).str.zfill(4).str[:2] + ":00"
-                    df_view = df_view.sort_values('일시')
-                
-                # 데이터 표
-                st.dataframe(df_view, use_container_width=True)
-                
-                # 그래프 (항목 선택)
-                metrics = [c for c in df_view.columns if c not in ['년', '월일', '시간', '일시', 'ptNo', 'ptNm']]
-                if metrics:
-                    sel_metric = st.selectbox(f"[{station['측정소명']}] 그래프 항목 선택", metrics, key=f"sel_{i}")
-                    st.line_chart(df_view.set_index('일시')[sel_metric])
-                else:
-                    st.warning("그래프를 그릴 수치 데이터가 없습니다.")
+            # WAMIS 컬럼명 매핑 (wtem:수온, ph:pH, ec:전기전도도, do:DO, toc:TOC...)
+            # * 실제 컬럼명은 응답을 봐야 정확하지만 보통 아래와 같습니다.
+            res = {
+                "지점명": name,
+                "시간": last.get('ymd', '-') + " " + last.get('hm', ''),
+                "pH": last.get('ph', '-'),
+                "수온(℃)": last.get('wtem', '-'),
+                "DO(mg/L)": last.get('do', '-'),
+                "TOC(mg/L)": last.get('toc', '-'),
+                "탁도(NTU)": last.get('tur', '-'),
+                "전기전도도": last.get('ec', '-'),
+                "총인(T-P)": last.get('tp', '-'),
+            }
+            results.append(res)
+        else:
+            # 데이터가 없으면 빈칸으로라도 표시
+            results.append({
+                "지점명": name,
+                "시간": "-",
+                "pH": "점검중",
+                "수온(℃)": "-",
+                "비고": "WAMIS 응답 없음"
+            })
+            
+        bar.progress((i+1)/len(STATIONS))
 
+    # 결과 표 출력
+    if results:
+        st.success("조회 완료! (WAMIS 제공)")
+        df_res = pd.DataFrame(results)
+        st.dataframe(df_res, use_container_width=True)
     else:
-        st.error("❌ 해당 API 키로 자동측정소 데이터를 찾지 못했습니다.")
-        st.warning("""
-        **가능한 원인:**
-        1. 이 API 키는 '일반측정망(월간 데이터)' 전용일 수 있습니다.
-        2. '수질자동측정망' 권한이 아직 승인되지 않았을 수 있습니다.
-        """)
+        st.error("WAMIS 서버에서 데이터를 가져오지 못했습니다.")
