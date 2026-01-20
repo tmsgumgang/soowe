@@ -2,123 +2,121 @@ import streamlit as st
 import pandas as pd
 import requests
 import urllib.parse
+import time
 
-st.set_page_config(page_title="관측소 명단 확보", layout="wide")
-st.title("📋 관측소 명단 리스트업 (2단계)")
+st.set_page_config(page_title="수질자동측정망 4번 공략", layout="wide")
+st.title("🧪 수질자동측정망 '4번 자료' 직공략")
+st.caption("목록 조회가 404라면, 'getMeasuringList(측정정보 조회)'를 바로 찌릅니다.")
 
-# 사용자 인증키 (Decoded)
+# 사용자 키
 USER_KEY = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
 
 # ---------------------------------------------------------
-# 1. [성공] 수위 관측소 (데이터 파싱 및 필터링)
+# [핵심] 4번 기능: 측정정보 조회 (getMeasuringList)
 # ---------------------------------------------------------
-@st.cache_data
-def load_water_level_list():
-    # 1단계에서 성공한 그 주소 그대로 사용
-    HRFCO_KEY = "F09631CC-1CFB-4C55-8329-BE03A787011E"
-    url = f"http://api.hrfco.go.kr/{HRFCO_KEY}/waterlevel/list.json"
+def hit_endpoint_4(station_code):
+    # 공공데이터포털 국립환경과학원 수질자동측정망 표준 주소
+    base_url = "http://apis.data.go.kr/1480523/WaterQualityService/getMeasuringList"
     
-    try:
-        r = requests.get(url, timeout=10)
-        data = r.json()
-        if 'content' in data:
-            df = pd.DataFrame(data['content'])
-            # 보기 좋게 컬럼 정리
-            # obsnm:관측소명, wlobscd:코드, agcnm:관리기관, addr:주소
-            if 'obsnm' in df.columns:
-                df = df[['obsnm', 'wlobscd', 'addr', 'agcnm']]
-                df.columns = ['관측소명', '코드', '주소', '관리기관']
-                return df
-    except:
-        pass
-    return pd.DataFrame()
-
-# ---------------------------------------------------------
-# 2. [수정] 수질자동측정망 (404 에러 해결 시도)
-# ---------------------------------------------------------
-def load_water_quality_list_fixed():
-    # 404 에러 원인: 키 인코딩 문제일 가능성 99%
-    # 해결책: params 딕셔너리를 쓰지 않고, URL에 키를 직접 문자열로 박아넣음
-    
-    base_url = "http://apis.data.go.kr/1480523/WaterQualityService/getMsrstnList"
-    
-    # 1. 키를 URL 인코딩 (공공데이터포털은 인코딩된 키를 원함)
+    # 키 인코딩 (필수)
     encoded_key = urllib.parse.quote(USER_KEY)
     
-    # 2. 완성된 URL 수동 조립
-    query_url = f"{base_url}?serviceKey={encoded_key}&numOfRows=100&pageNo=1&returnType=json"
+    # 파라미터 조립 (4번 기능 표준 파라미터)
+    # ptNo: 측정소코드
+    params = f"?serviceKey={encoded_key}&numOfRows=10&pageNo=1&returnType=json&ptNo={station_code}"
+    
+    full_url = base_url + params
     
     try:
-        r = requests.get(query_url, timeout=10)
+        r = requests.get(full_url, timeout=5)
         
         if r.status_code == 200:
             try:
                 data = r.json()
-                if 'getMsrstnList' in data and 'item' in data['getMsrstnList']:
-                    items = data['getMsrstnList']['item']
-                    df = pd.DataFrame(items)
-                    # 필요한 컬럼만
-                    if 'ptNm' in df.columns:
-                        df = df[['ptNm', 'ptNo', 'addr']]
-                        df.columns = ['측정소명', '코드', '주소']
-                        return df, "성공"
+                # 데이터 구조 확인
+                if 'getMeasuringList' in data and 'item' in data['getMeasuringList']:
+                    items = data['getMeasuringList']['item']
+                    if items:
+                        # 리스트가 아니라 딕셔너리 하나만 올 수도 있음
+                        if isinstance(items, dict): items = [items]
+                        return items[0], "성공"
             except:
-                return None, "JSON 변환 실패 (키 인증은 됐으나 데이터가 XML임)"
+                pass
         elif r.status_code == 404:
-            return None, "여전히 404 (주소 오류)"
+            return None, "404(주소틀림)"
         elif r.status_code == 500:
-            return None, "500 에러 (서버 내부 오류 - 키 문제일 수음)"
+            return None, "500(서버오류)"
             
     except Exception as e:
         return None, str(e)
         
-    return None, f"상태코드: {r.status_code}"
+    return None, "데이터 없음"
 
 # ---------------------------------------------------------
-# 메인 화면
+# 코드 스캐닝 (용담호 찾기)
 # ---------------------------------------------------------
-tab1, tab2 = st.tabs(["🌊 수위 관측소 (성공)", "🧪 수질 측정소 (재시도)"])
+# 수질자동측정망은 보통 S + 숫자 3자리 ~ 4자리 코드를 씁니다. (금강은 S03xxx 예상)
+# 혹은 WAMIS 코드(2003660 등)를 그대로 쓸 수도 있습니다.
+CANDIDATE_CODES = [
+    # 1. 자동측정망 전용 코드 (S코드) - 금강 권역(S03) 집중 스캔
+    *[f"S03{i:03d}" for i in range(1, 20)],
+    # 2. WAMIS 코드 (혹시나 해서)
+    "2003660", "3012640", "3008680" 
+]
 
-# 탭 1: 수위 (이미 성공했으므로 예쁘게 보여주기만 하면 됨)
-with tab1:
-    st.subheader("✅ 수위 관측소 명단 (한강홍수통제소)")
+# ---------------------------------------------------------
+# 메인 UI
+# ---------------------------------------------------------
+st.info("💡 '4번 기능'을 사용하여 용담호, 대청호 데이터를 찾습니다.")
+
+if st.button("🚀 4번 자료 조회 시작 (코드 스캔)", type="primary"):
     
-    df_wl = load_water_level_list()
-    if not df_wl.empty:
-        # 우리가 원하는 '갑천', '이원' 등이 있는지 검색 기능 제공
-        search = st.text_input("수위 관측소 검색", "갑천")
+    results = []
+    bar = st.progress(0)
+    found_count = 0
+    
+    status_text = st.empty()
+    
+    for i, code in enumerate(CANDIDATES_CODES):
+        status_text.text(f"스캔 중... {code}")
         
-        if search:
-            mask = df_wl['관측소명'].str.contains(search)
-            st.dataframe(df_wl[mask], use_container_width=True)
-        else:
-            st.dataframe(df_wl, use_container_width=True)
+        # 0.1초 딜레이 (서버 보호)
+        time.sleep(0.1)
         
-        st.success(f"총 {len(df_wl)}개의 관측소 데이터를 확보했습니다.")
+        data, msg = hit_endpoint_4(code)
+        
+        if data:
+            # 성공! (데이터가 들어옴)
+            found_count += 1
+            
+            # 항목 매핑 (pH, DO, TOC 등)
+            # API마다 필드명이 다를 수 있어 유연하게 처리
+            res = {
+                "코드": code,
+                "시간": data.get('dt') or data.get('ymdhm') or data.get('wmyr'),
+                "pH": data.get('ph') or data.get('item_ph'),
+                "DO": data.get('do') or data.get('item_do'),
+                "TOC": data.get('toc') or data.get('item_toc'),
+                "탁도": data.get('tur') or data.get('item_tur'),
+                "수온": data.get('wtem') or data.get('item_temp'),
+                "전기전도도": data.get('ec') or data.get('item_ec')
+            }
+            results.append(res)
+            
+        elif msg == "404(주소틀림)":
+            # 404가 계속 뜨면 주소 자체가 틀린 것 (즉시 중단)
+            st.error("🚨 4번 기능 주소도 404입니다. 'getMeasuringList'가 아닌 다른 이름일 수 있습니다.")
+            st.stop()
+            
+        bar.progress((i+1)/len(CANDIDATE_CODES))
+        
+    status_text.text("스캔 완료")
+
+    # 결과 표
+    if results:
+        st.success(f"🎉 {found_count}개의 데이터를 찾았습니다!")
+        df = pd.DataFrame(results)
+        st.dataframe(df, use_container_width=True)
+        st.caption("위 표에 데이터가 나왔다면 성공입니다. 이제 이 코드들로 그래프를 그리면 됩니다.")
     else:
-        st.error("데이터를 가져오지 못했습니다.")
-
-# 탭 2: 수질 (404 잡기)
-with tab2:
-    st.subheader("🛠️ 수질 측정소 명단 (용담호~부여)")
-    
-    if st.button("수질 목록 가져오기 (강제 주입 방식)"):
-        df_wq, msg = load_water_quality_list_fixed()
-        
-        if df_wq is not None:
-            st.success("🎉 드디어 뚫렸습니다! 목록을 확인하세요.")
-            
-            # 주요 지점 확인
-            targets = ["용담", "봉황", "이원", "장계", "옥천", "대청", "현도", "갑천", "미호", "남면", "공주", "유구", "부여"]
-            mask = df_wq['측정소명'].apply(lambda x: any(t in x for t in targets))
-            target_df = df_wq[mask]
-            
-            if not target_df.empty:
-                st.write("##### 🎯 주요 관심 지점 (확인됨)")
-                st.dataframe(target_df, use_container_width=True)
-            
-            with st.expander("전체 목록 보기"):
-                st.dataframe(df_wq)
-        else:
-            st.error(f"실패: {msg}")
-            st.info("여전히 404라면, '국립환경과학원' API 서버 주소가 변경되었거나 일시적 점검일 수 있습니다.")
+        st.warning("스캔 결과 데이터가 없습니다. (키 권한 문제거나, 코드가 S03 계열이 아닐 수 있습니다.)")
