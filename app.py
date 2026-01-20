@@ -2,176 +2,143 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
-import urllib3
 import time
-import glob
-
-# SSL 경고 무시
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ---------------------------------------------------------
-# 설정: 대시보드 스타일
+# 설정
 # ---------------------------------------------------------
-st.set_page_config(page_title="금강 수계 상황실", layout="wide")
+st.set_page_config(page_title="수질자동측정소 조회", layout="wide")
+st.title("🧪 금강 수계 수질자동측정소 데이터 조회")
+st.caption("제공해주신 API 키로 '용담호, 봉황천' 등의 실시간 수질 데이터를 확인합니다.")
 
-# 제목 (새로고침 버튼 포함)
-c1, c2 = st.columns([4, 1])
-c1.title("🌊 금강 수계 실시간 상황실")
-if c2.button("🔄 현황 새로고침"):
-    st.rerun()
+# 제공해주신 키
+API_KEY_DECODED = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
 
-st.markdown("---")
-
-HRFCO_KEY = "F09631CC-1CFB-4C55-8329-BE03A787011E"
-HEADERS = {'User-Agent': 'Mozilla/5.0'}
+# 금강 수계 자동측정소 예상 코드 범위 (S03001 ~ S03030)
+# * S03은 금강 권역을 의미할 확률이 높습니다.
+CODE_CANDIDATES = [f"S03{i:03d}" for i in range(1, 31)]
 
 # ---------------------------------------------------------
-# [사전 정의] 스마트 보정 데이터
+# 데이터 조회 함수
 # ---------------------------------------------------------
-# 1. 코드가 틀렸을 때 자동으로 바꿔주는 지도
-CODE_MAP = {
-    "3009660": "3009665", # 갑천교
-    "3009670": "3009675", # 원촌교
-    "3008680": "3008685", # 이원교
-    "3012640": "3012633", # 공주보 -> 공주(금강교)
-}
-
-# 2. 해발고도(EL.m)를 수심(m)으로 바꾸기 위한 강바닥 높이
-ZERO_POINT_MAP = {
-    "이원": 25.5,  # 이원교 보정값
-    "대청": 0,     # 댐은 해발고도 유지
-}
-
-# 3. 파일이 없을 때 보여줄 기본 지점들
-DEFAULT_STATIONS = [
-    {"관측소명": "갑천(갑천교)", "코드": "3009665"},
-    {"관측소명": "옥천(이원교)", "코드": "3008685"},
-    {"관측소명": "공주시(금강교)", "코드": "3012633"},
-    {"관측소명": "세종보", "코드": "3012650"},
-]
-
-# ---------------------------------------------------------
-# 데이터 로직: 3시간치 데이터 가져오기
-# ---------------------------------------------------------
-@st.cache_data(ttl=600) # 10분 캐싱 (너무 자주 호출하면 차단되니까)
-def get_3h_trend(station_name, original_code):
-    # 1. 코드 보정
-    code = CODE_MAP.get(str(original_code), str(original_code))
+def fetch_water_quality(pt_no):
+    url = "http://apis.data.go.kr/1480523/WaterQualityService/getWaterMeasuringList"
     
-    # 2. 시간 설정 (최근 3시간 + 여유분)
-    now = datetime.utcnow() + timedelta(hours=9)
-    start = now - timedelta(hours=4) # 4시간 전부터 조회
+    # 최근 데이터를 보기 위해 날짜 설정
+    now = datetime.now()
+    wmyr = now.strftime("%Y")
     
-    s_str = start.strftime("%Y%m%d%H%M")
-    e_str = now.strftime("%Y%m%d%H%M")
-    
-    # 10분 단위 API (그래프용)
-    url = f"http://api.hrfco.go.kr/{HRFCO_KEY}/waterlevel/list/10M/{code}/{s_str}/{e_str}.json"
+    params = {
+        "serviceKey": API_KEY_DECODED,
+        "numOfRows": "10", # 최근 10개
+        "pageNo": "1",
+        "returnType": "json",
+        "ptNo": pt_no,
+        "wmyr": wmyr, 
+        # wmmd는 생략하면 해당 연도 전체 혹은 최근 데이터를 줄 수 있음
+    }
     
     try:
-        r = requests.get(url, headers=HEADERS, verify=False, timeout=2)
-        if r.status_code == 200:
-            data = r.json()
-            if 'content' in data and data['content']:
-                df = pd.DataFrame(data['content'])
-                
-                # 데이터 전처리
-                df['datetime'] = pd.to_datetime(df['ymdhm'], format='%Y%m%d%H%M')
-                df['wl'] = pd.to_numeric(df['wl'], errors='coerce')
-                df = df.dropna(subset=['wl']) # 빈값 제거
-                
-                if df.empty: return None, "데이터 없음"
-                
-                # [수심 변환 로직 적용]
-                offset = 0
-                for key, val in ZERO_POINT_MAP.items():
-                    if key in station_name:
-                        # 수위가 보정값보다 클 때만 적용 (해발고도일 확률 높음)
-                        if df['wl'].mean() > val:
-                            offset = val
-                        break
-                
-                df['adj_wl'] = df['wl'] - offset
-                df = df.sort_values('datetime')
-                
-                # 최근 3시간만 필터링
-                cutoff = now - timedelta(hours=3)
-                df_final = df[df['datetime'] >= cutoff]
-                
-                if df_final.empty: return None, "최근 데이터 없음"
-                
-                # 현재 수위와 단위 정보
-                current_val = df_final.iloc[-1]['adj_wl']
-                unit = "수심(m)" if offset > 0 or current_val < 20 else "해발(EL.m)"
-                
-                return {
-                    'df': df_final[['datetime', 'adj_wl']],
-                    'current': current_val,
-                    'unit': unit,
-                    'last_time': df_final.iloc[-1]['datetime'].strftime("%H:%M")
-                }, "성공"
-                
-    except Exception as e:
-        return None, f"에러: {e}"
-        
-    return None, "통신 실패"
-
-# ---------------------------------------------------------
-# 메인 화면 구성
-# ---------------------------------------------------------
-
-# 1. 관측소 목록 준비
-station_list = []
-files = glob.glob("*.csv")
-if files:
-    target = "station_list.csv" if "station_list.csv" in files else files[0]
-    try:
-        df_csv = pd.read_csv(target, dtype=str)
-        for _, row in df_csv.iterrows():
-            code = row.get('수위코드') or row.get('코드')
-            name = row.get('관측소명')
-            station_list.append({"관측소명": name, "코드": code})
-        st.caption(f"📂 '{target}' 파일 연동됨")
+        res = requests.get(url, params=params, timeout=3)
+        if res.status_code == 200:
+            data = res.json()
+            if 'getWaterMeasuringList' in data and 'item' in data['getWaterMeasuringList']:
+                items = data['getWaterMeasuringList']['item']
+                if items:
+                    # 리스트가 아니면 리스트로 변환
+                    if isinstance(items, dict): items = [items]
+                    return pd.DataFrame(items), "성공"
     except:
-        station_list = DEFAULT_STATIONS
-else:
-    station_list = DEFAULT_STATIONS
-    st.caption("📂 연동된 파일이 없어 '기본 지점'을 표시합니다.")
+        pass
+    return None, "데이터 없음"
 
-# 2. 대시보드 그리기 (2열 그리드)
-cols = st.columns(2) # 2칸씩 배치
+# ---------------------------------------------------------
+# 메인 UI
+# ---------------------------------------------------------
+st.info("💡 버튼을 누르면 '용담호, 장계, 이원' 등의 코드를 자동으로 찾아냅니다.")
 
-for i, station in enumerate(station_list):
-    col = cols[i % 2] # 왼쪽/오른쪽 번갈아가며
+if st.button("🚀 금강 수계 자동측정소 스캔 시작", type="primary"):
     
-    with col:
-        with st.container(border=True): # 카드박스 형태로 감싸기
-            st.subheader(f"📍 {station['관측소명']}")
+    found_stations = []
+    bar = st.progress(0)
+    status_text = st.empty()
+    
+    # 1. 코드 스캔
+    for i, code in enumerate(CODE_CANDIDATES):
+        status_text.text(f"스캔 중... {code}")
+        
+        df, msg = fetch_water_quality(code)
+        
+        if df is not None and not df.empty:
+            # 측정소 이름 확인 (ptNm 필드)
+            station_name = df.iloc[0].get('ptNm', '이름미상')
             
-            # 데이터 로딩
-            data, msg = get_3h_trend(station['관측소명'], station['코드'])
+            # 우리가 찾는 금강 지점이 맞는지 확인
+            target_names = ["용담", "봉황", "이원", "장계", "옥천", "대청", "현도", "갑천", "미호", "남면", "공주", "유구", "부여"]
+            is_target = any(t in station_name for t in target_names)
             
-            if data:
-                # 1. 큰 숫자로 현재 수위 표시
-                delta = None
-                if len(data['df']) >= 2:
-                    # 전 시간 대비 증감 계산
-                    prev = data['df'].iloc[-2]['adj_wl']
-                    diff = data['current'] - prev
-                    delta = f"{diff:+.2f}m"
-                
-                st.metric(
-                    label=f"현재 수위 ({data['last_time']} 기준)",
-                    value=f"{data['current']:.2f} {data['unit']}",
-                    delta=delta
-                )
-                
-                # 2. 그래프 그리기 (X축: 시간, Y축: 보정수위)
-                chart_data = data['df'].set_index('datetime')
-                st.line_chart(chart_data, height=200, color="#0068c9")
-                
-            else:
-                st.error(f"데이터 수신 실패 ({msg})")
-                st.caption("잠시 후 '새로고침'을 눌러주세요.")
+            if is_target:
+                found_stations.append({
+                    "코드": code,
+                    "측정소명": station_name,
+                    "데이터": df
+                })
+        
+        # 서버 부하 방지
+        time.sleep(0.1)
+        bar.progress((i + 1) / len(CODE_CANDIDATES))
+    
+    status_text.text("스캔 완료!")
+    
+    # 2. 결과 보여주기
+    if found_stations:
+        st.success(f"🎉 총 {len(found_stations)}개의 측정소를 찾았습니다!")
+        
+        # 탭 생성
+        tabs = st.tabs([s['측정소명'] for s in found_stations])
+        
+        for i, tab in enumerate(tabs):
+            station = found_stations[i]
+            df = station['데이터']
             
-            time.sleep(0.1) # 서버 부하 방지
+            with tab:
+                st.subheader(f"📍 {station['측정소명']} ({station['코드']})")
+                
+                # 필요한 항목만 추리기 (대소문자 무관하게 처리)
+                cols_map = {
+                    'ph': 'pH', 'wtep': '수온(℃)', 'ec': '전기전도도', 
+                    'tur': '탁도(NTU)', 'do': 'DO(mg/L)', 'toc': 'TOC(mg/L)', 
+                    'tn': 'T-N(mg/L)', 'tp': 'T-P(mg/L)',
+                    'wmyr': '년', 'wmmd': '월일', 'wmht': '시간'
+                }
+                
+                # 실제 데이터에 있는 컬럼만 선택
+                available_cols = [c for c in df.columns if c.lower() in cols_map]
+                df_view = df[available_cols].copy()
+                df_view.columns = [cols_map.get(c.lower(), c) for c in df_view.columns]
+                
+                # 날짜 시간 만들기
+                if '년' in df_view.columns and '월일' in df_view.columns:
+                    df_view['일시'] = df_view['년'] + "-" + df_view['월일'].str[:2] + "-" + df_view['월일'].str[2:]
+                    if '시간' in df_view.columns:
+                         df_view['일시'] += " " + df_view['시간'].astype(str).str.zfill(4).str[:2] + ":00"
+                    df_view = df_view.sort_values('일시')
+                
+                # 데이터 표
+                st.dataframe(df_view, use_container_width=True)
+                
+                # 그래프 (항목 선택)
+                metrics = [c for c in df_view.columns if c not in ['년', '월일', '시간', '일시', 'ptNo', 'ptNm']]
+                if metrics:
+                    sel_metric = st.selectbox(f"[{station['측정소명']}] 그래프 항목 선택", metrics, key=f"sel_{i}")
+                    st.line_chart(df_view.set_index('일시')[sel_metric])
+                else:
+                    st.warning("그래프를 그릴 수치 데이터가 없습니다.")
+
+    else:
+        st.error("❌ 해당 API 키로 자동측정소 데이터를 찾지 못했습니다.")
+        st.warning("""
+        **가능한 원인:**
+        1. 이 API 키는 '일반측정망(월간 데이터)' 전용일 수 있습니다.
+        2. '수질자동측정망' 권한이 아직 승인되지 않았을 수 있습니다.
+        """)
