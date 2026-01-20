@@ -1,102 +1,53 @@
 import streamlit as st
-import pandas as pd
 import requests
 from datetime import datetime, timedelta
 
-# ---------------------------------------------------------
-# 1. 설정
-# ---------------------------------------------------------
-st.set_page_config(page_title="실시간 수위 조회 테스트")
+st.set_page_config(page_title="API 연결 진단")
+st.title("🩺 한강홍수통제소 API 정밀 진단")
 
-# 한강홍수통제소 API 키
+# 사용자가 입력한 키
 HRFCO_KEY = "F09631CC-1CFB-4C55-8329-BE03A787011E"
 
-# ---------------------------------------------------------
-# 2. 지점 목록 (수동 정의)
-# ---------------------------------------------------------
-def get_station_list():
-    # 7자리 표준 코드 (한강홍수통제소 기준)
-    return {
-        "공주보 수위국": "3012640",
-        "세종보 수위국": "3012650",
-        "백제보 수위국": "3012620",
-        "대전 갑천 (갑천교)": "3009660",
-        "옥천 이원 (이원교)": "3008680",
-        "대청댐 (본체)": "1003660"
-    }
+# 테스트할 지점 (가장 확실한 '공주보' 사용)
+TEST_CODE = "3012640" 
+TEST_NAME = "공주보 수위국"
 
-# ---------------------------------------------------------
-# 3. API 호출 함수 (10분 단위 데이터)
-# ---------------------------------------------------------
-def get_realtime_water_level(station_code):
-    """
-    최근 24시간의 10분 단위 수위 데이터를 가져옵니다.
-    """
-    # 시간 설정 (현재 시간 ~ 24시간 전)
-    end_dt = datetime.now()
-    start_dt = end_dt - timedelta(hours=24)
+if st.button("진단 시작 (서버 응답 뜯어보기)"):
+    # 1. 요청 URL 만들기 (최근 1시간 데이터)
+    now = datetime.now()
+    start = now - timedelta(hours=1)
     
-    # API 포맷 (YYYYMMDDHHMM)
-    s_str = start_dt.strftime("%Y%m%d%H%M")
-    e_str = end_dt.strftime("%Y%m%d%H%M")
+    # 포맷: YYYYMMDDHHMM
+    s_str = start.strftime("%Y%m%d%H%M")
+    e_str = now.strftime("%Y%m%d%H%M")
     
-    # 10분 단위(10M) API 호출 URL
-    url = f"http://api.hrfco.go.kr/{HRFCO_KEY}/waterlevel/list/10M/{station_code}/{s_str}/{e_str}.json"
+    url = f"http://api.hrfco.go.kr/{HRFCO_KEY}/waterlevel/list/10M/{TEST_CODE}/{s_str}/{e_str}.json"
+    
+    st.write("📡 **요청 보낸 주소 (URL):**")
+    st.code(url.replace(HRFCO_KEY, "API_KEY_HIDDEN")) # 키는 가려서 보여줌
     
     try:
-        # SSL 인증서 검증 무시 (verify=False)
+        # 2. 서버에 요청 보내기
         response = requests.get(url, verify=False)
-        data = response.json()
         
-        if 'content' in data:
-            items = data['content']
-            df = pd.DataFrame(items)
-            
-            # 컬럼 전처리
-            # ymdhm: 시간, wl: 수위(m)
-            df['datetime'] = pd.to_datetime(df['ymdhm'], format='%Y%m%d%H%M')
-            df['수위(m)'] = pd.to_numeric(df['wl'], errors='coerce')
-            
-            # 최신순 정렬
-            return df[['datetime', '수위(m)']].sort_values('datetime', ascending=True)
+        st.write(f"🚦 **HTTP 상태 코드:** {response.status_code}")
+        
+        # 3. 응답 내용 확인
+        st.subheader("📨 서버가 보낸 원본 메시지:")
+        raw_text = response.text
+        
+        if not raw_text:
+            st.error("❌ 응답이 완전히 비어있습니다. (IP 차단 가능성)")
         else:
-            return pd.DataFrame()
-            
+            # HTML/XML 에러인지 JSON인지 확인
+            if "<" in raw_text and ">" in raw_text:
+                 st.code(raw_text, language='xml') # XML/HTML 에러
+                 st.warning("⚠️ XML이나 HTML이 왔습니다. 키 오류거나 주소 오류일 수 있습니다.")
+            elif "{" in raw_text:
+                 st.code(raw_text, language='json') # JSON 응답
+                 st.success("✅ JSON 응답이 왔습니다. 내용을 확인하세요.")
+            else:
+                 st.code(raw_text)
+                 
     except Exception as e:
-        st.error(f"통신 에러: {e}")
-        return pd.DataFrame()
-
-# ---------------------------------------------------------
-# 4. 메인 화면
-# ---------------------------------------------------------
-st.title("💧 실시간 수위 데이터 확인")
-st.caption(f"API Key: {HRFCO_KEY[:5]}... (한강홍수통제소)")
-
-# 사이드바: 지점 선택
-stations = get_station_list()
-selected_name = st.sidebar.selectbox("지점 선택", list(stations.keys()))
-selected_code = stations[selected_name]
-
-st.sidebar.info(f"선택된 코드: {selected_code}")
-
-if st.button("수위 읽어오기", type="primary"):
-    with st.spinner(f"'{selected_name}' 접속 중..."):
-        df = get_realtime_water_level(selected_code)
-        
-        if not df.empty:
-            # 1. 최신 수위 표시 (Metric)
-            last_row = df.iloc[-1]
-            current_level = last_row['수위(m)']
-            current_time = last_row['datetime'].strftime("%H시 %M분")
-            
-            st.metric(label=f"현재 수위 ({current_time} 기준)", value=f"{current_level} m")
-            
-            # 2. 그래프 그리기
-            st.line_chart(df, x='datetime', y='수위(m)', color='#007acc')
-            
-            # 3. 데이터 표
-            with st.expander("상세 데이터 보기"):
-                st.dataframe(df.sort_values('datetime', ascending=False)) # 최신순 보기
-                
-        else:
-            st.error("데이터를 가져오지 못했습니다. 코드가 맞는지 확인해주세요.")
+        st.error(f"❌ 통신 오류 발생: {e}")
