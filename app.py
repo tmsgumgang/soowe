@@ -1,17 +1,16 @@
 import streamlit as st
 import pandas as pd
 import requests
-import time
 
 # ---------------------------------------------------------
 # 1. 설정
 # ---------------------------------------------------------
-st.set_page_config(page_title="관측소 명단 (한글)", layout="wide")
-st.title("📋 전국 관측소 '한글 이름표' 조회기")
-st.caption("영어 코드(wlobscd)와 약어(wl)를 알기 쉬운 한글로 바꿨습니다.")
+st.set_page_config(page_title="관측소 전체 조회 (원본)", layout="wide")
+st.title("📋 전국 관측소 리스트 (필터링 OFF)")
+st.caption("API가 보내주는 모든 정보를 숨김없이 그대로 보여줍니다.")
 
 # API 키
-HRFCO_KEY = "F09631CC-1CFB-4C55-8329-BE03A787011E" # 수위
+HRFCO_KEY = "F09631CC-1CFB-4C55-8329-BE03A787011E"
 try:
     DATA_GO_KEY = st.secrets["public_api_key"]
 except:
@@ -20,110 +19,108 @@ except:
 HEADERS = {'User-Agent': 'Mozilla/5.0'}
 
 # ---------------------------------------------------------
-# 2. 수위 관측소 (한강홍수통제소) - 이름표 붙이기
+# 2. 한강홍수통제소 (수위) - 모든 컬럼 가져오기
 # ---------------------------------------------------------
-def get_hrfco_stations():
+def get_hrfco_all_columns():
     url = f"http://api.hrfco.go.kr/{HRFCO_KEY}/waterlevel/list.json"
     
     try:
-        response = requests.get(url, headers=HEADERS, verify=False, timeout=10)
+        response = requests.get(url, headers=HEADERS, verify=False, timeout=15)
         data = response.json()
         
         if 'content' in data:
             df = pd.DataFrame(data['content'])
             
-            # [핵심] 영어 컬럼 -> 한글로 강제 변환
-            # API가 주는 원래 이름: wlobscd(코드), obsnm(이름), addr(주소)
-            df = df.rename(columns={
-                'obsnm': '관측소명',      # 여기가 핵심! 이름을 한글 컬럼으로
+            # [수정] 한글 변환을 시도는 하되, 없는 컬럼은 쿨하게 넘어감
+            # 혹시 이름이 obsnm이 아니라 other_name 일 수도 있으니 여러개 시도
+            rename_map = {
                 'wlobscd': '코드',
+                'obsnm': '관측소명',
+                'station_nm': '관측소명', # 혹시 이걸로 올까봐
                 'addr': '주소',
                 'agcnm': '관리기관',
                 'lat': '위도',
                 'lon': '경도'
-            })
+            }
+            # 컬럼 이름 바꾸기 (해당하는 것만 바뀜)
+            df = df.rename(columns=rename_map)
             
-            # 화면에 보여줄 순서 정리 (이름이 제일 먼저 나오게)
-            cols = ['관측소명', '코드', '주소', '관리기관']
-            # 데이터에 없는 컬럼은 빼고 선택
-            final_cols = [c for c in cols if c in df.columns]
-            
-            return df[final_cols], "성공"
+            # [핵심] 필터링 삭제! 모든 컬럼을 그냥 리턴함
+            # 이름을 앞으로 보내기 위해 순서만 살짝 조정
+            cols = list(df.columns)
+            if '관측소명' in cols:
+                cols.insert(0, cols.pop(cols.index('관측소명')))
+            if '코드' in cols:
+                cols.insert(1, cols.pop(cols.index('코드')))
+                
+            return df[cols], "성공"
         else:
-            return None, "데이터 없음"
+            return None, "데이터 없음 (Content 비어있음)"
     except Exception as e:
-        return None, str(e)
+        return None, f"에러: {e}"
 
 # ---------------------------------------------------------
-# 3. 수질 측정소 (환경공단) - 이름표 붙이기
+# 3. 환경공단 (수질) - 모든 컬럼 가져오기
 # ---------------------------------------------------------
-def get_nier_stations():
+def get_nier_all_columns():
     url = "http://apis.data.go.kr/1480523/WaterQualityService/getMsrstnList"
     params = {"serviceKey": DATA_GO_KEY, "numOfRows": "3000", "pageNo": "1", "returnType": "json"}
     
     try:
-        response = requests.get(url, params=params, headers=HEADERS, timeout=15)
-        
-        # JSON 파싱
+        response = requests.get(url, params=params, headers=HEADERS, timeout=20)
         try:
             data = response.json()
-            items = data['getMsrstnList']['item']
-            df = pd.DataFrame(items)
-            
-            # [핵심] 영어 컬럼 -> 한글로 강제 변환
-            # API가 주는 원래 이름: ptNm(이름), ptNo(코드)
-            df = df.rename(columns={
-                'ptNm': '측정소명',    # 이름
-                'ptNo': '코드',       # 코드
-                'addr': '주소',
-                'deptNm': '관리부서'
-            })
-            
-            cols = ['측정소명', '코드', '주소', '관리부서']
-            final_cols = [c for c in cols if c in df.columns]
-            
-            return df[final_cols], "성공"
+            if 'getMsrstnList' in data and 'item' in data['getMsrstnList']:
+                df = pd.DataFrame(data['getMsrstnList']['item'])
+                
+                # 한글 변환 (필터링 X)
+                rename_map = {
+                    'ptNo': '코드',
+                    'ptNm': '측정소명',
+                    'addr': '주소',
+                    'deptNm': '관리부서'
+                }
+                df = df.rename(columns=rename_map)
+                
+                # 순서 조정
+                cols = list(df.columns)
+                if '측정소명' in cols:
+                    cols.insert(0, cols.pop(cols.index('측정소명')))
+                    
+                return df[cols], "성공"
+            return None, "데이터 없음"
         except:
             return None, "응답 형식 에러"
     except Exception as e:
-        return None, str(e)
+        return None, f"에러: {e}"
 
 # ---------------------------------------------------------
 # 4. 메인 화면
 # ---------------------------------------------------------
-tab1, tab2 = st.tabs(["🌊 수위 관측소 (이름 확인)", "🧪 수질 측정소 (이름 확인)"])
+tab1, tab2 = st.tabs(["🌊 수위 관측소 (전체)", "🧪 수질 측정소 (전체)"])
 
-# 탭 1: 수위
 with tab1:
-    if st.button("수위 관측소 명단 보기", type="primary"):
-        with st.spinner("이름표 붙이는 중..."):
-            df, msg = get_hrfco_stations()
+    if st.button("수위 관측소 전체 조회", key="btn1"):
+        with st.spinner("가져오는 중..."):
+            df, msg = get_hrfco_all_columns()
             if df is not None:
-                st.success(f"✅ {len(df)}개 관측소의 이름을 가져왔습니다.")
+                st.success(f"✅ 총 {len(df)}개 관측소 (숨겨진 컬럼 없이 모두 표시)")
+                st.dataframe(df, use_container_width=True)
                 
-                # 검색창
-                search = st.text_input("이름 검색 (예: 공주, 갑천)", key="s1")
-                if search:
-                    mask = df['관측소명'].str.contains(search) | df['주소'].str.contains(search, na=False)
-                    st.dataframe(df[mask], use_container_width=True, hide_index=True)
-                else:
-                    st.dataframe(df, use_container_width=True, hide_index=True)
+                csv = df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥 엑셀 다운로드", csv, "수위관측소_전체.csv")
             else:
-                st.error(f"실패: {msg}")
+                st.error(msg)
 
-# 탭 2: 수질
 with tab2:
-    if st.button("수질 측정소 명단 보기", type="primary"):
-        with st.spinner("이름표 붙이는 중..."):
-            df_q, msg_q = get_nier_stations()
+    if st.button("수질 측정소 전체 조회", key="btn2"):
+        with st.spinner("가져오는 중..."):
+            df_q, msg_q = get_nier_all_columns()
             if df_q is not None:
-                st.success(f"✅ {len(df_q)}개 측정소의 이름을 가져왔습니다.")
+                st.success(f"✅ 총 {len(df_q)}개 측정소")
+                st.dataframe(df_q, use_container_width=True)
                 
-                search_q = st.text_input("이름 검색 (예: 이원, 대청)", key="s2")
-                if search_q:
-                    mask = df_q['측정소명'].str.contains(search_q) | df_q['주소'].str.contains(search_q, na=False)
-                    st.dataframe(df_q[mask], use_container_width=True, hide_index=True)
-                else:
-                    st.dataframe(df_q, use_container_width=True, hide_index=True)
+                csv_q = df_q.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥 엑셀 다운로드", csv_q, "수질측정소_전체.csv")
             else:
-                st.error(f"실패: {msg_q}")
+                st.error(msg_q)
