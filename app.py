@@ -4,116 +4,84 @@ import requests
 import urllib.parse
 import time
 
-st.set_page_config(page_title="수질자동측정망 4번 공략", layout="wide")
-st.title("🧪 수질자동측정망 '4번 자료' 직공략 (수정됨)")
-st.caption("목록 조회가 404라면, 'getMeasuringList(측정정보 조회)'를 바로 찌릅니다.")
+st.set_page_config(page_title="API 주소 정밀 탐지", layout="wide")
+st.title("🕵️‍♂️ 수질자동측정망 '진짜 주소' 찾기")
+st.caption("404 에러를 해결하기 위해, 가능한 모든 API 주소 패턴을 테스트합니다.")
 
 # 사용자 키
 USER_KEY = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
+ENCODED_KEY = urllib.parse.quote(USER_KEY)
 
 # ---------------------------------------------------------
-# [핵심] 4번 기능: 측정정보 조회 (getMeasuringList)
+# 테스트할 주소 후보군 (가능성 높은 순서)
 # ---------------------------------------------------------
-def hit_endpoint_4(station_code):
-    # 공공데이터포털 국립환경과학원 수질자동측정망 표준 주소
-    base_url = "http://apis.data.go.kr/1480523/WaterQualityService/getMeasuringList"
-    
-    # 키 인코딩 (필수)
-    encoded_key = urllib.parse.quote(USER_KEY)
-    
-    # 파라미터 조립 (4번 기능 표준 파라미터)
-    params = f"?serviceKey={encoded_key}&numOfRows=1&pageNo=1&returnType=json&ptNo={station_code}"
-    
-    full_url = base_url + params
-    
-    try:
-        r = requests.get(full_url, timeout=5)
-        
-        if r.status_code == 200:
-            try:
-                data = r.json()
-                # 데이터 구조 확인
-                if 'getMeasuringList' in data and 'item' in data['getMeasuringList']:
-                    items = data['getMeasuringList']['item']
-                    if items:
-                        # 리스트가 아니라 딕셔너리 하나만 올 수도 있음
-                        if isinstance(items, dict): items = [items]
-                        return items[0], "성공"
-            except:
-                pass
-        elif r.status_code == 404:
-            return None, "404(주소틀림)"
-        elif r.status_code == 500:
-            return None, "500(서버오류)"
-            
-    except Exception as e:
-        return None, str(e)
-        
-    return None, "데이터 없음"
+# S03001: 용담호로 추정되는 코드
+TEST_CODE = "S03001" 
 
-# ---------------------------------------------------------
-# 코드 스캐닝 (용담호 찾기)
-# ---------------------------------------------------------
-# [수정된 부분] 변수명 오타 수정 완료
-CANDIDATE_CODES = [
-    # 1. 자동측정망 전용 코드 (S코드) - 금강 권역(S03) 집중 스캔
-    *[f"S03{i:03d}" for i in range(1, 30)], # 범위를 30까지 늘렸습니다
-    # 2. WAMIS 코드 (혹시나 해서)
-    "2003660", "3012640", "3008680" 
+CANDIDATE_URLS = [
+    # 1. 실시간 수질 데이터 (가장 유력)
+    ("getRealTimeWaterQualityList", "http://apis.data.go.kr/1480523/WaterQualityService/getRealTimeWaterQualityList"),
+    
+    # 2. 측정 정보 조회 (일반)
+    ("getMeasuringList", "http://apis.data.go.kr/1480523/WaterQualityService/getMeasuringList"),
+    
+    # 3. 측정소 목록 조회
+    ("getMsrstnList", "http://apis.data.go.kr/1480523/WaterQualityService/getMsrstnList"),
+    
+    # 4. 방사성 물질 조회 (혹시나 서비스 ID 확인용)
+    ("getRadioActiveMaterList", "http://apis.data.go.kr/1480523/WaterQualityService/getRadioActiveMaterList"),
+    
+    # 5. 수생태 측정망 (다른 서비스 ID 가능성)
+    ("getBioMsrstnList", "http://apis.data.go.kr/1480523/WaterQualityService/getBioMsrstnList"),
 ]
 
 # ---------------------------------------------------------
-# 메인 UI
+# 메인 로직
 # ---------------------------------------------------------
-st.info("💡 '4번 기능'을 사용하여 용담호, 대청호 데이터를 찾습니다.")
-
-if st.button("🚀 4번 자료 조회 시작 (코드 스캔)", type="primary"):
+if st.button("🚀 주소 스캔 시작 (정답 찾기)", type="primary"):
     
-    results = []
-    bar = st.progress(0)
-    found_count = 0
+    st.write("### 📡 스캔 결과 로그")
+    found_url = None
     
-    status_text = st.empty()
+    for name, url in CANDIDATE_URLS:
+        # URL 조립
+        full_url = f"{url}?serviceKey={ENCODED_KEY}&numOfRows=1&pageNo=1&returnType=json&ptNo={TEST_CODE}"
+        
+        try:
+            r = requests.get(full_url, timeout=5)
+            status = r.status_code
+            
+            if status == 200:
+                try:
+                    data = r.json()
+                    st.success(f"✅ **[200 OK] {name}** - 접속 성공!")
+                    st.json(data) # 데이터 내용 보여주기
+                    found_url = url
+                    break # 정답 찾으면 중단
+                except:
+                    st.warning(f"⚠️ **[200 OK] {name}** - 접속은 됐는데 JSON이 아님 (XML 에러 가능성)")
+                    st.code(r.text[:200], language="xml")
+                    
+            elif status == 404:
+                st.error(f"❌ **[404 Not Found] {name}** - 주소 틀림")
+            elif status == 500:
+                st.error(f"❌ **[500 Error] {name}** - 서버 내부 오류 (키 문제일 수 있음)")
+                
+        except Exception as e:
+            st.error(f"🚫 통신 오류: {e}")
+            
+        time.sleep(0.5)
+        
+    st.divider()
     
-    # [수정] 오타 수정된 변수 사용
-    for i, code in enumerate(CANDIDATE_CODES):
-        status_text.text(f"스캔 중... {code}")
-        
-        # 0.1초 딜레이 (서버 보호)
-        time.sleep(0.1)
-        
-        data, msg = hit_endpoint_4(code)
-        
-        if data:
-            # 성공! (데이터가 들어옴)
-            found_count += 1
-            
-            # 항목 매핑
-            res = {
-                "코드": code,
-                "측정소명": data.get('ptNm') or data.get('SPOT_NAME') or "이름미상", # 이름이 들어오는지 확인
-                "시간": data.get('dt') or data.get('ymdhm') or data.get('wmyr'),
-                "pH": data.get('ph') or data.get('item_ph'),
-                "DO": data.get('do') or data.get('item_do'),
-                "TOC": data.get('toc') or data.get('item_toc'),
-                "탁도": data.get('tur') or data.get('item_tur'),
-                "수온": data.get('wtem') or data.get('item_temp'),
-            }
-            results.append(res)
-            
-        elif msg == "404(주소틀림)":
-            st.error("🚨 4번 기능 주소도 404입니다. 주소가 틀렸을 수 있습니다.")
-            st.stop()
-            
-        bar.progress((i+1)/len(CANDIDATE_CODES))
-        
-    status_text.text("스캔 완료")
-
-    # 결과 표
-    if results:
-        st.success(f"🎉 {found_count}개의 데이터를 찾았습니다!")
-        df = pd.DataFrame(results)
-        st.dataframe(df, use_container_width=True)
-        st.caption("위 표에 데이터가 나왔다면 성공입니다. 이제 이 코드들로 그래프를 그리면 됩니다.")
+    if found_url:
+        st.success(f"🎉 **찾아낸 정답 주소:** `{found_url}`")
+        st.info("이제 이 주소로 데이터를 조회하면 됩니다!")
     else:
-        st.warning("스캔 결과 데이터가 없습니다. (키 권한 문제거나, 코드가 S03 계열이 아닐 수 있습니다.)")
+        st.error("😢 모든 주소가 404입니다. 공공데이터포털의 '상세 기능' 명세를 다시 확인해야 합니다.")
+        st.markdown("""
+        **[체크리스트]**
+        1. 공공데이터포털 > 마이페이지 > 활용신청현황 > **[국립환경과학원_수질자동측정망]** 클릭
+        2. 상세설명에 적힌 **'오퍼레이션 명(Operation Name)'**이 무엇인지 확인해주세요.
+           (예: `getRealTimeWaterQualityList`, `getAutoMeasuringList` 등)
+        """)
