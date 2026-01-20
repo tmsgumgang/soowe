@@ -5,7 +5,7 @@ import urllib.parse
 import time
 
 st.set_page_config(page_title="수질자동측정망 4번 공략", layout="wide")
-st.title("🧪 수질자동측정망 '4번 자료' 직공략")
+st.title("🧪 수질자동측정망 '4번 자료' 직공략 (수정됨)")
 st.caption("목록 조회가 404라면, 'getMeasuringList(측정정보 조회)'를 바로 찌릅니다.")
 
 # 사용자 키
@@ -22,8 +22,7 @@ def hit_endpoint_4(station_code):
     encoded_key = urllib.parse.quote(USER_KEY)
     
     # 파라미터 조립 (4번 기능 표준 파라미터)
-    # ptNo: 측정소코드
-    params = f"?serviceKey={encoded_key}&numOfRows=10&pageNo=1&returnType=json&ptNo={station_code}"
+    params = f"?serviceKey={encoded_key}&numOfRows=1&pageNo=1&returnType=json&ptNo={station_code}"
     
     full_url = base_url + params
     
@@ -55,11 +54,10 @@ def hit_endpoint_4(station_code):
 # ---------------------------------------------------------
 # 코드 스캐닝 (용담호 찾기)
 # ---------------------------------------------------------
-# 수질자동측정망은 보통 S + 숫자 3자리 ~ 4자리 코드를 씁니다. (금강은 S03xxx 예상)
-# 혹은 WAMIS 코드(2003660 등)를 그대로 쓸 수도 있습니다.
+# [수정된 부분] 변수명 오타 수정 완료
 CANDIDATE_CODES = [
     # 1. 자동측정망 전용 코드 (S코드) - 금강 권역(S03) 집중 스캔
-    *[f"S03{i:03d}" for i in range(1, 20)],
+    *[f"S03{i:03d}" for i in range(1, 30)], # 범위를 30까지 늘렸습니다
     # 2. WAMIS 코드 (혹시나 해서)
     "2003660", "3012640", "3008680" 
 ]
@@ -77,7 +75,8 @@ if st.button("🚀 4번 자료 조회 시작 (코드 스캔)", type="primary"):
     
     status_text = st.empty()
     
-    for i, code in enumerate(CANDIDATES_CODES):
+    # [수정] 오타 수정된 변수 사용
+    for i, code in enumerate(CANDIDATE_CODES):
         status_text.text(f"스캔 중... {code}")
         
         # 0.1초 딜레이 (서버 보호)
@@ -89,23 +88,21 @@ if st.button("🚀 4번 자료 조회 시작 (코드 스캔)", type="primary"):
             # 성공! (데이터가 들어옴)
             found_count += 1
             
-            # 항목 매핑 (pH, DO, TOC 등)
-            # API마다 필드명이 다를 수 있어 유연하게 처리
+            # 항목 매핑
             res = {
                 "코드": code,
+                "측정소명": data.get('ptNm') or data.get('SPOT_NAME') or "이름미상", # 이름이 들어오는지 확인
                 "시간": data.get('dt') or data.get('ymdhm') or data.get('wmyr'),
                 "pH": data.get('ph') or data.get('item_ph'),
                 "DO": data.get('do') or data.get('item_do'),
                 "TOC": data.get('toc') or data.get('item_toc'),
                 "탁도": data.get('tur') or data.get('item_tur'),
                 "수온": data.get('wtem') or data.get('item_temp'),
-                "전기전도도": data.get('ec') or data.get('item_ec')
             }
             results.append(res)
             
         elif msg == "404(주소틀림)":
-            # 404가 계속 뜨면 주소 자체가 틀린 것 (즉시 중단)
-            st.error("🚨 4번 기능 주소도 404입니다. 'getMeasuringList'가 아닌 다른 이름일 수 있습니다.")
+            st.error("🚨 4번 기능 주소도 404입니다. 주소가 틀렸을 수 있습니다.")
             st.stop()
             
         bar.progress((i+1)/len(CANDIDATE_CODES))
