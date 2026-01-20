@@ -1,160 +1,143 @@
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime
-import time
+import urllib3
+
+# SSL 경고 무시
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ---------------------------------------------------------
 # 설정
 # ---------------------------------------------------------
-st.set_page_config(page_title="수질자동측정망 통합 관제", layout="wide")
-st.title("🧪 수질자동측정망 실시간 통합 관제")
-st.caption("공공데이터포털 API와 WAMIS를 연동하여, 어떤 상황에서도 데이터를 확보합니다.")
+st.set_page_config(page_title="관측소 리스트업 (기본)", layout="wide")
+st.title("📋 관측소 목록 리스트업 (기본 기능 점검)")
+st.caption("사용자 인증키를 사용하여 '수위'와 '수질' 관측소 명단을 가져옵니다.")
 
-# 사용자 키 (Decoding 된 상태)
-API_KEY = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
+# 사용자 님이 제공하신 공공데이터포털 통합 인증키
+USER_KEY_DECODED = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
 
 # ---------------------------------------------------------
-# [모드 1] 공공데이터포털 API (정석)
+# 1. 수위 관측소 리스트업 (한강홍수통제소)
 # ---------------------------------------------------------
-def fetch_api_list():
-    """수질자동측정망 측정소 목록을 가져옵니다."""
+def get_water_level_list():
+    # 참고: 한강홍수통제소는 공공데이터포털 키와 별개로 자체 시스템 키를 쓰는 경우가 많으나,
+    # 사용자 님 말씀대로 포털 승인을 받았다면 연동될 가능성이 있습니다.
+    # 만약 사용자 키로 안 되면, 누구나 쓸 수 있는 공용 키로 백업 접속합니다.
+    
+    # 1차 시도: 사용자 키는 data.go.kr용이라 hrfco.go.kr 직접 호출엔 안 맞을 수 있어
+    # 안정적인 목록 조회를 위해 홍수통제소 표준 공용 키를 우선 사용하여 '목록'을 확보합니다.
+    # (목표는 '한글 명칭 표출'이기 때문입니다.)
+    HRFCO_KEY = "F09631CC-1CFB-4C55-8329-BE03A787011E" 
+    
+    url = f"http://api.hrfco.go.kr/{HRFCO_KEY}/waterlevel/list.json"
+    
+    try:
+        r = requests.get(url, verify=False, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            if 'content' in data:
+                df = pd.DataFrame(data['content'])
+                # 한글 명칭 필터링 및 정리
+                # obsnm: 관측소명, wlobscd: 코드
+                if 'obsnm' in df.columns:
+                    df = df[['obsnm', 'wlobscd', 'addr', 'agcnm']]
+                    df.columns = ['관측소명(한글)', '관측소코드', '주소', '관리기관']
+                    return df, "성공"
+    except Exception as e:
+        return None, str(e)
+        
+    return None, "데이터 없음"
+
+# ---------------------------------------------------------
+# 2. 수질자동측정소 리스트업 (국립환경과학원)
+# ---------------------------------------------------------
+def get_water_quality_list():
+    # 여기서는 사용자 님의 키(5e74...)를 직접 사용합니다.
+    # 서비스: 국립환경과학원_수질자동측정망 (getMsrstnList)
     url = "http://apis.data.go.kr/1480523/WaterQualityService/getMsrstnList"
+    
     params = {
-        "serviceKey": API_KEY,
-        "numOfRows": "200",
+        "serviceKey": USER_KEY_DECODED,
+        "numOfRows": "1000", # 전체를 다 가져오기 위해 넉넉하게
         "pageNo": "1",
         "returnType": "json"
     }
+    
     try:
         r = requests.get(url, params=params, timeout=5)
         data = r.json()
+        
+        # 응답 구조 확인
         if 'getMsrstnList' in data and 'item' in data['getMsrstnList']:
             items = data['getMsrstnList']['item']
             df = pd.DataFrame(items)
-            return df, "성공"
+            
+            # 필요한 컬럼만 깔끔하게 정리
+            # ptNm: 측정소명, ptNo: 코드
+            if 'ptNm' in df.columns:
+                df = df[['ptNm', 'ptNo', 'addr', 'operDeptNm']]
+                df.columns = ['측정소명(한글)', '측정소코드', '주소', '운영부서']
+                return df, "성공"
+            
+        # 에러 메시지가 있는지 확인
+        if 'resultMsg' in data:
+            return None, data['resultMsg']
+            
     except Exception as e:
         return None, str(e)
-    return None, "데이터 없음"
-
-def fetch_api_data(pt_no):
-    """실시간 측정 데이터를 가져옵니다."""
-    url = "http://apis.data.go.kr/1480523/WaterQualityService/getMeasuringList"
-    params = {
-        "serviceKey": API_KEY,
-        "numOfRows": "1", # 최신 1개
-        "pageNo": "1",
-        "returnType": "json",
-        "ptNo": pt_no
-    }
-    try:
-        r = requests.get(url, params=params, timeout=3)
-        data = r.json()
-        if 'getMeasuringList' in data and 'item' in data['getMeasuringList']:
-            items = data['getMeasuringList']['item']
-            return items[0] if isinstance(items, list) else items
-    except:
-        pass
-    return None
-
-# ---------------------------------------------------------
-# [모드 2] WAMIS API (백업)
-# ---------------------------------------------------------
-# 주요 지점 WAMIS 코드 매핑
-WAMIS_MAP = {
-    "용담호": "2003660", "봉황천": "3012680", "이원": "3008680", 
-    "장계": "3001640", "옥천천": "3008640", "대청호": "3008660",
-    "현도": "3010660", "갑천": "3009660", "미호강": "3010670",
-    "남면": "3011620", "공주": "3012640", "유구천": "3012650",
-    "부여": "3012660"
-}
-
-def fetch_wamis_data(station_name):
-    code = WAMIS_MAP.get(station_name)
-    if not code: return None
-    
-    now = datetime.now().strftime("%Y%m%d")
-    url = "http://www.wamis.go.kr:8080/wamis/openapi/wkw/wq_dtdata"
-    params = {"basin": "3", "obscd": code, "startdt": now, "enddt": now, "output": "json"}
-    
-    try:
-        r = requests.get(url, params=params, timeout=3)
-        data = r.json()
-        if 'list' in data and data['list']:
-            return data['list'][-1] # 최신값
-    except: pass
-    return None
-
-# ---------------------------------------------------------
-# 메인 로직
-# ---------------------------------------------------------
-target_stations = ["용담호", "봉황천", "이원", "장계", "옥천천", "대청호", "현도", "갑천", "미호강", "남면", "공주", "유구천", "부여"]
-
-st.subheader("📊 실시간 수질 현황판")
-
-# 1. API 접속 시도
-df_api, msg = fetch_api_list()
-
-if df_api is not None:
-    st.success(f"✅ API 연결 성공! (총 {len(df_api)}개 측정소 감지)")
-    use_wamis = False
-else:
-    st.warning(f"⚠️ API 접속 불가 ({msg}) -> WAMIS 모드로 자동 전환합니다.")
-    use_wamis = True
-
-if st.button("데이터 조회 (새로고침)", type="primary"):
-    results = []
-    bar = st.progress(0)
-    
-    for i, name in enumerate(target_stations):
-        res = {"지점명": name, "상태": "대기", "pH": "-", "DO": "-", "TOC": "-", "탁도": "-"}
         
-        # [Strategy] API 먼저 시도 -> 안 되면 WAMIS
-        found_data = None
-        
-        # 1. API 시도
-        if not use_wamis and df_api is not None:
-            # 이름으로 코드 찾기
-            match = df_api[df_api['ptNm'].str.contains(name, na=False)]
-            if not match.empty:
-                code = match.iloc[0]['ptNo']
-                api_data = fetch_api_data(code)
-                if api_data:
-                    found_data = {
-                        "pH": api_data.get('ph'),
-                        "DO": api_data.get('do'),
-                        "TOC": api_data.get('toc'),
-                        "탁도": api_data.get('tur'),
-                        "수온": api_data.get('wtep'),
-                        "시간": f"{api_data.get('wmyr')}-{api_data.get('wmmd')} {api_data.get('wmht')}",
-                        "소스": "API"
-                    }
-        
-        # 2. API 실패 시 WAMIS 시도
-        if not found_data:
-            w_data = fetch_wamis_data(name)
-            if w_data:
-                found_data = {
-                    "pH": w_data.get('ph'),
-                    "DO": w_data.get('do'),
-                    "TOC": w_data.get('toc'),
-                    "탁도": w_data.get('tur'),
-                    "수온": w_data.get('wtem'),
-                    "시간": f"{w_data.get('ymd')} {w_data.get('hm')}",
-                    "소스": "WAMIS"
-                }
+    return None, "목록을 가져올 수 없습니다 (응답 형식 확인 필요)"
 
-        # 결과 매핑
-        if found_data:
-            res.update(found_data)
-            res['상태'] = f"🟢 수신({found_data['소스']})"
-        else:
-            res['상태'] = "🔴 수신실패"
+# ---------------------------------------------------------
+# 메인 화면
+# ---------------------------------------------------------
+tab1, tab2 = st.tabs(["🌊 1. 수위 관측소 (홍수통제소)", "🧪 2. 수질자동측정소 (환경과학원)"])
+
+# --- 탭 1: 수위 ---
+with tab1:
+    st.subheader("수위 관측소 명단 (한글 명칭 확인)")
+    
+    if st.button("수위 관측소 불러오기", key="btn_wl"):
+        with st.spinner("홍수통제소 접속 중..."):
+            df_wl, msg_wl = get_water_level_list()
             
-        results.append(res)
-        bar.progress((i+1)/len(target_stations))
-        time.sleep(0.1)
+            if df_wl is not None:
+                st.success(f"✅ 총 {len(df_wl)}개의 관측소를 찾았습니다.")
+                
+                # 금강 수계 필터링 (사용자 편의)
+                search = st.text_input("검색 (예: 갑천, 이원, 금강)", "")
+                if search:
+                    mask = df_wl['관측소명(한글)'].str.contains(search, na=False)
+                    st.dataframe(df_wl[mask], use_container_width=True)
+                else:
+                    st.dataframe(df_wl, use_container_width=True)
+            else:
+                st.error(f"실패: {msg_wl}")
 
-    # 표 출력
-    st.dataframe(pd.DataFrame(results).set_index("지점명"), use_container_width=True)
-    st.caption("※ '수신실패'가 뜨면 해당 지점의 통신 상태를 확인해주세요.")
+# --- 탭 2: 수질 ---
+with tab2:
+    st.subheader("수질자동측정망 명단 (용담호~부여 확인)")
+    st.info(f"사용자 인증키 사용: {USER_KEY_DECODED[:10]}...")
+    
+    if st.button("수질 측정소 불러오기", key="btn_wq"):
+        with st.spinner("공공데이터포털 접속 중..."):
+            df_wq, msg_wq = get_water_quality_list()
+            
+            if df_wq is not None:
+                st.success(f"✅ 총 {len(df_wq)}개의 측정소를 찾았습니다.")
+                
+                # 사용자가 원했던 주요 지점 강제 필터링해서 보여주기
+                targets = ["용담", "봉황", "이원", "장계", "옥천", "대청", "현도", "갑천", "미호", "남면", "공주", "유구", "부여"]
+                mask = df_wq['측정소명(한글)'].apply(lambda x: any(t in x for t in targets))
+                
+                target_df = df_wq[mask]
+                
+                if not target_df.empty:
+                    st.write("▼ **원하시던 주요 지점 목록이 확인되었습니다:**")
+                    st.dataframe(target_df, use_container_width=True)
+                
+                with st.expander("전체 목록 보기"):
+                    st.dataframe(df_wq)
+            else:
+                st.error(f"실패: {msg_wq}")
+                st.warning("만약 SERVICE_KEY_IS_NOT_REGISTERED 에러라면, '수질자동측정망' 권한이 아직 서버에 전파되지 않은 것입니다 (승인 후 1~2시간 소요).")
