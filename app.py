@@ -3,16 +3,16 @@ import pandas as pd
 import requests
 import urllib.parse
 import time
-import math
 import xml.etree.ElementTree as ET
 import urllib3
+from datetime import datetime
 
 # SSL 경고 무시
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-st.set_page_config(page_title="수질 실시간(진짜)", layout="wide")
-st.title("🧪 금강 수계 실시간 수질 (최신값 강제 조회)")
-st.caption("과거 데이터(2007년)를 건너뛰고, 전체 페이지를 계산하여 '맨 마지막 최신값'을 가져옵니다.")
+st.set_page_config(page_title="2026 실시간 수질", layout="wide")
+st.title("🧪 금강 수계 '진짜' 실시간 데이터 (2026년)")
+st.caption("연도(2026)를 명시하여 2달 전 데이터가 아닌, '오늘 현재' 데이터를 가져옵니다.")
 
 # 사용자 키
 USER_KEY = "5e7413b16c759d963b94776062c5a130c3446edf4d5f7f77a679b91bfd437912"
@@ -20,115 +20,111 @@ ENCODED_KEY = urllib.parse.quote(USER_KEY)
 BASE_URL = "https://apis.data.go.kr/1480523/WaterQualityService/getRealTimeWaterQualityList"
 
 # ---------------------------------------------------------
-# [핵심] 최신 데이터 조회 로직 (2단계 점프)
+# [핵심] 2026년 데이터 강제 조회 함수
 # ---------------------------------------------------------
-def fetch_latest_realtime(station_code):
-    # 1단계: 1페이지를 호출해서 totalCount(전체 개수) 확인
-    first_url = f"{BASE_URL}?serviceKey={ENCODED_KEY}&numOfRows=1&pageNo=1&siteId={station_code}"
+def fetch_2026_realtime(station_code):
+    # 오늘 날짜 계산 (월, 일)
+    now = datetime.now()
+    current_year = now.strftime("%Y") # 2026
+    current_month = now.strftime("%m") # 01
+    
+    # [수정] wmyr(연도) 파라미터 추가! 이게 없으면 옛날 것만 줍니다.
+    # numOfRows=10: 최신순으로 정렬해서 10개만 가져오기
+    params = f"?serviceKey={ENCODED_KEY}&numOfRows=10&pageNo=1&siteId={station_code}&wmyr={current_year}"
+    full_url = BASE_URL + params
     
     try:
-        r1 = requests.get(first_url, verify=False, timeout=5)
-        if r1.status_code != 200: return None, f"HTTP {r1.status_code}"
+        r = requests.get(full_url, verify=False, timeout=5)
         
-        root = ET.fromstring(r1.content)
-        total_count_text = root.findtext('.//totalCount')
-        
-        if not total_count_text or int(total_count_text) == 0:
-            return None, "데이터 없음"
+        if r.status_code == 200:
+            try:
+                root = ET.fromstring(r.content)
+                items = root.findall('.//item')
+                
+                if items:
+                    # 날짜/시간 기준으로 내림차순 정렬 (최신 -> 과거)
+                    # API가 가끔 정렬 안 된 데이터를 줄 때가 있어 안전장치 추가
+                    parsed_items = []
+                    for item in items:
+                        d = {child.tag: child.text for child in item}
+                        parsed_items.append(d)
+                    
+                    # msrDate(날짜) + msrTime(시간) 기준 정렬
+                    parsed_items.sort(key=lambda x: (x.get('msrDate', ''), x.get('msrTime', '')), reverse=True)
+                    
+                    # 가장 최신 것 리턴
+                    return parsed_items[0], "성공"
+                else:
+                    # 2026년 데이터가 없으면?
+                    return None, f"2026년 데이터 없음"
+            except Exception as e:
+                return None, f"파싱 에러: {e}"
+        else:
+            return None, f"HTTP {r.status_code}"
             
-        total_count = int(total_count_text)
-        
-        # 2단계: 마지막 페이지 계산 (10개씩 볼 때)
-        # 예: 45개면 -> 5페이지가 마지막
-        page_size = 10
-        last_page = math.ceil(total_count / page_size)
-        
-        # 3단계: 마지막 페이지 호출
-        final_url = f"{BASE_URL}?serviceKey={ENCODED_KEY}&numOfRows={page_size}&pageNo={last_page}&siteId={station_code}"
-        r2 = requests.get(final_url, verify=False, timeout=10)
-        
-        if r2.status_code == 200:
-            root2 = ET.fromstring(r2.content)
-            items = root2.findall('.//item')
-            
-            if items:
-                # 리스트 중 가장 마지막 것이 최신 데이터
-                # (혹시 순서가 섞여있을 수 있으니 날짜로 정렬)
-                parsed_items = []
-                for item in items:
-                    d = {child.tag: child.text for child in item}
-                    parsed_items.append(d)
-                
-                # 날짜(msrDate) + 시간(msrTime) 기준으로 내림차순 정렬 (최신이 위로)
-                # msrTime이 없는 경우도 대비
-                parsed_items.sort(key=lambda x: (x.get('msrDate', ''), x.get('msrTime', '')), reverse=True)
-                
-                return parsed_items[0], "성공"
-                
-        return None, "마지막 페이지 로드 실패"
-
     except Exception as e:
-        return None, f"에러: {e}"
+        return None, f"통신 에러: {e}"
 
 # ---------------------------------------------------------
-# 메인 UI: 금강 수계 전수 조사
+# 메인 UI
 # ---------------------------------------------------------
-# 금강 수계 추정 코드 범위 (S03001 ~ S03020)
+# 금강 수계 S코드 스캔 (S03001 ~ S03020)
 SCAN_CODES = [f"S03{i:03d}" for i in range(1, 21)]
 
-if st.button("🚀 최신 실시간 데이터 가져오기", type="primary"):
+if st.button("🚀 2026년 최신 데이터 조회", type="primary"):
     
     results = []
     bar = st.progress(0)
-    status_text = st.empty()
+    status = st.empty()
     
-    success_count = 0
+    success_cnt = 0
     
     for i, code in enumerate(SCAN_CODES):
-        status_text.text(f"조회 중... {code} (최신값 탐색)")
+        status.text(f"스캔 중... {code}")
         time.sleep(0.1)
         
-        item, msg = fetch_latest_realtime(code)
+        item, msg = fetch_2026_realtime(code)
         
         if item:
-            success_count += 1
-            # 항목 매핑 (API 필드명 -> 한글)
+            success_cnt += 1
+            # 결과 저장
             res = {
                 "코드": code,
                 "지점명": item.get('siteName', '-'),
                 "시간": f"{item.get('msrDate', '')} {item.get('msrTime', '')}",
-                "pH": item.get('m70', '-'),   # 보통 m70이 pH
-                "DO(mg/L)": item.get('m69', '-'),   # m69
-                "TOC(mg/L)": item.get('m27', '-'),  # m27
-                "탁도(NTU)": item.get('m29', '-'),  # m29
-                "전기전도도": item.get('m71', '-'), # m71
-                "수온(℃)": item.get('m72', '-'),    # m72
-                "총인(T-P)": item.get('m37', '-'),  # m37
-                "총질소(T-N)": item.get('m28', '-'), # m28
+                "수온(℃)": item.get('m72', '-'),    # 수온
+                "pH": item.get('m70', '-'),        # pH
+                "DO(mg/L)": item.get('m69', '-'),  # DO
+                "탁도(NTU)": item.get('m29', '-'), # 탁도
+                "TOC(mg/L)": item.get('m27', '-'), # TOC
+                "전기전도도": item.get('m71', '-'), # EC
+                "총인(T-P)": item.get('m37', '-'),  # T-P
             }
             results.append(res)
-        else:
-            # 실패한 건 굳이 보여주지 않거나 로그만 남김
-            # results.append({"코드": code, "상태": msg})
-            pass
             
         bar.progress((i+1)/len(SCAN_CODES))
         
-    status_text.text("조회 완료!")
+    status.text("조회 완료")
 
-    # 결과 출력
     if results:
         df = pd.DataFrame(results)
         
-        st.success(f"🎉 총 {success_count}개 지점의 최신 데이터를 가져왔습니다!")
-        st.dataframe(df, use_container_width=True)
+        # [중요] 날짜 확인
+        dates = df['시간'].sort_values(ascending=False).unique()
+        latest_date = dates[0] if len(dates) > 0 else "없음"
         
-        # 날짜 확인 사살
-        latest_date = df['시간'].max()
-        st.info(f"📅 데이터 기준 시간: **{latest_date}** (이제 2026년 데이터가 맞을 겁니다!)")
+        st.subheader(f"📊 조회 결과 (최신 기준: {latest_date})")
+        
+        if "2026" in str(latest_date):
+            st.success(f"✅ 드디어 **2026년 데이터**를 잡았습니다!")
+        else:
+            st.warning(f"⚠️ 아직도 날짜가 {latest_date} 입니다. API 서버에 2026년 데이터가 안 올라온 것일 수 있습니다.")
+            
+        st.dataframe(df, use_container_width=True)
         
         # 다운로드
         csv = df.to_csv(index=False).encode('utf-8-sig')
-        st.download_button("📥 결과 엑셀 다운로드", csv, "수질_실시간_최신.csv")
+        st.download_button("📥 엑셀 다운로드", csv, "수질_2026_최신.csv")
+        
     else:
-        st.warning("데이터를 찾지 못했습니다. S코드 범위가 다르거나 통신 에러일 수 있습니다.")
+        st.error("데이터를 하나도 못 가져왔습니다. (2026년 파라미터를 넣었더니 응답이 없음)")
